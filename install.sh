@@ -56,4 +56,22 @@ case ":$PATH:" in
     ;;
 esac
 
-say "done. next: crate init"
+# Chain straight into setup. Under `curl | bash` stdin is the script itself,
+# so give init the real terminal; skip when non-interactive (CI) or already
+# set up (this is an update run).
+initialized=0
+if [ -f "$HOME/.contextcrate/config" ]; then
+  SYNC_URL=""
+  # crate's own config, plain sourceable bash
+  . "$HOME/.contextcrate/config" 2>/dev/null || true
+  # a configured sync URL without a clone means a previous init didn't finish
+  if [ -z "$SYNC_URL" ] || [ -d "$HOME/.contextcrate/sync/.git" ]; then initialized=1; fi
+fi
+if [ "$initialized" -eq 1 ]; then
+  say "done — already initialized ('crate status' to check the fleet)"
+elif { : </dev/tty; } 2>/dev/null; then
+  say "starting setup…"
+  "$BIN/crate" init </dev/tty || say "setup did not finish — fix the issue above and run: crate init"
+else
+  say "done. next: crate init"
+fi
