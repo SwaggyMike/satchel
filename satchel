@@ -30,19 +30,50 @@ ENGINE=""
 
 # ---------------------------------------------------------------- helpers
 
-info() { printf 'satchel: %s\n' "$*" >&2; }
-warn() { printf 'satchel: warning: %s\n' "$*" >&2; }
-die()  { printf 'satchel: error: %s\n' "$*" >&2; exit 1; }
+# Colors are enabled only for a terminal, unless CLICOLOR_FORCE=1 is set.
+# NO_COLOR always wins so logs and automation can opt out explicitly.
+color_enabled() {
+  local fd="$1"
+  [ -z "${NO_COLOR:-}" ] || return 1
+  [ "${TERM:-}" != dumb ] || return 1
+  [ "${CLICOLOR_FORCE:-0}" = 1 ] || [ -t "$fd" ]
+}
+
+if color_enabled 1; then
+  OUT_RESET=$'\033[0m'; OUT_BOLD=$'\033[1m'
+  OUT_CYAN=$'\033[36m'; OUT_BLUE=$'\033[34m'; OUT_GREEN=$'\033[32m'
+  OUT_YELLOW=$'\033[33m'; OUT_RED=$'\033[31m'
+else
+  OUT_RESET=""; OUT_BOLD=""; OUT_CYAN=""; OUT_BLUE=""
+  OUT_GREEN=""; OUT_YELLOW=""; OUT_RED=""
+fi
+if color_enabled 2; then
+  ERR_RESET=$'\033[0m'; ERR_BOLD=$'\033[1m'
+  ERR_CYAN=$'\033[36m'; ERR_BLUE=$'\033[34m'; ERR_GREEN=$'\033[32m'
+  ERR_YELLOW=$'\033[33m'; ERR_RED=$'\033[31m'
+else
+  ERR_RESET=""; ERR_BOLD=""; ERR_CYAN=""; ERR_BLUE=""
+  ERR_GREEN=""; ERR_YELLOW=""; ERR_RED=""
+fi
+
+info() { printf '%s%s%s\n' "$ERR_CYAN" "satchel: $*" "$ERR_RESET" >&2; }
+warn() { printf '%s%s%s\n' "$ERR_YELLOW" "satchel: warning: $*" "$ERR_RESET" >&2; }
+die()  { printf '%s%s%s\n' "$ERR_RED$ERR_BOLD" "satchel: error: $*" "$ERR_RESET" >&2; exit 1; }
+success() { printf '%s%s%s\n' "$ERR_GREEN" "satchel: $*" "$ERR_RESET" >&2; }
+
+prompt_text() { printf '%s%s%s' "$ERR_BOLD$ERR_BLUE" "$1" "$ERR_RESET"; }
+out_header() { printf '%s%s%s\n' "$OUT_BOLD$OUT_CYAN" "$*" "$OUT_RESET"; }
+out_section() { printf '%s%s%s\n' "$OUT_BOLD$OUT_BLUE" "$*" "$OUT_RESET"; }
 
 confirm() { # confirm "question"  → returns 0 on yes; default no (for destructive asks)
   local reply
-  read -r -p "$1 [y/N] " reply
+  read -r -p "$(prompt_text "$1 [y/N] ")" reply
   [[ "$reply" == [yY]* ]]
 }
 
 confirm_yes() { # default yes (for asks almost everyone wants)
   local reply
-  read -r -p "$1 [Y/n] " reply
+  read -r -p "$(prompt_text "$1 [Y/n] ")" reply
   [[ ! "$reply" == [nN]* ]]
 }
 
@@ -222,18 +253,18 @@ cmd_mcp() {
         | while IFS=$'\t' read -r name url auth; do
             local has="no token"
             [ -n "$(token_for "$name")" ] && has="token on this machine"
-            printf '  %-20s %s  (%s, %s)\n' "$name" "$url" "$auth" "$has"
+            printf '  %s%-20s%s %s  (%s, %s)\n' "$OUT_BOLD$OUT_BLUE" "$name" "$OUT_RESET" "$url" "$auth" "$has"
           done
       ;;
     add)
       local name="${1:-}" url="${2:-}" auth="bearer"
       # Bare 'satchel mcp add' walks through it; args skip the questions.
       if [ -z "$name" ]; then
-        read -r -p "  server name (e.g. homeassistant): " name
+        read -r -p "$(prompt_text "  server name (e.g. homeassistant): ")" name
         [ -n "$name" ] || { info "cancelled"; return 0; }
       fi
       if [ -z "$url" ]; then
-        read -r -p "  server URL (e.g. http://host:8123/api/mcp): " url
+        read -r -p "$(prompt_text "  server URL (e.g. http://host:8123/api/mcp): ")" url
         [ -n "$url" ] || { info "cancelled"; return 0; }
         if ! confirm_yes "  does it need a bearer token?"; then auth="none"; fi
       fi
@@ -259,10 +290,10 @@ cmd_mcp() {
         [ "${#names[@]}" -gt 0 ] || die "no MCP servers registered"
         info "registered servers:"
         for i in "${!names[@]}"; do
-          printf '  %d) %s\n' "$((i + 1))" "${names[$i]}" >&2
+          printf '  %s%d)%s %s\n' "$ERR_BOLD$ERR_BLUE" "$((i + 1))" "$ERR_RESET" "${names[$i]}" >&2
         done
         local choice
-        read -r -p "remove which server? [1-${#names[@]}, empty to cancel]: " choice
+        read -r -p "$(prompt_text "remove which server? [1-${#names[@]}, empty to cancel]: ")" choice
         [ -n "$choice" ] || { info "cancelled"; return 0; }
         printf '%s' "$choice" | grep -Eq '^[0-9]+$' && [ "$choice" -ge 1 ] && [ "$choice" -le "${#names[@]}" ] \
           || die "not a valid choice: $choice"
@@ -281,13 +312,13 @@ cmd_mcp() {
 
 prompt_token() { # ADR 0002: offer synced (default) or local-only storage
   local name="$1" token where
-  echo >&2
-  read -r -s -p "  token for '$name' (input is hidden; Enter to skip): " token; echo >&2
+  printf '\n' >&2
+  read -r -s -p "$(prompt_text "  token for '$name' (input is hidden; Enter to skip): ")" token; printf '\n' >&2
   [ -n "$token" ] || { warn "no token given — '$name' will be configured without auth headers"; return 0; }
-  printf '  1) synced — available on every machine\n' >&2
-  printf '  2) local — this machine only\n' >&2
-  read -r -p "  store token where? [1]: " where
-  echo >&2
+  printf '  %s1)%s synced — available on every machine\n' "$ERR_BOLD$ERR_BLUE" "$ERR_RESET" >&2
+  printf '  %s2)%s local — this machine only\n' "$ERR_BOLD$ERR_BLUE" "$ERR_RESET" >&2
+  read -r -p "$(prompt_text "  store token where? [1]: ")" where
+  printf '\n' >&2
   if [ "$where" = "2" ]; then
     set_token "$name" "$token" "$LOCAL_TOKENS_FILE"
     info "token saved on this machine only"
@@ -671,7 +702,7 @@ cmd_key() {
 # ssh-add exit codes: 0 = agent has keys, 1 = agent empty, 2 = no agent.
 ssh_key_hint() {
   case "$1" in ssh://*|git@*) ;; *) return 0 ;; esac
-  echo >&2
+  printf '\n' >&2
   local agent_rc=0
   ssh-add -l >/dev/null 2>&1 || agent_rc=$?
   case "$agent_rc" in
@@ -692,9 +723,9 @@ cmd_init() {
   mkdir -p "$SATCHEL_DIR" && chmod 700 "$SATCHEL_DIR"
 
   local name url
-  read -r -p "machine name [$MACHINE]: " name
+  read -r -p "$(prompt_text "machine name [$MACHINE]: ")" name
   name="$(slugify "${name:-$MACHINE}")"
-  read -r -p "sync repo URL (private git repo; empty to skip sync for now)${SYNC_URL:+ [$SYNC_URL]}: " url
+  read -r -p "$(prompt_text "sync repo URL (private git repo; empty to skip sync for now)${SYNC_URL:+ [$SYNC_URL]}: ")" url
   url="${url:-$SYNC_URL}"
 
   {
@@ -737,7 +768,7 @@ cmd_init() {
     # This push is also the write-access check: a read-only deploy key fails
     # HERE, while the user is watching, not at some background session end.
     if git_sync push -u origin HEAD; then
-      info "machine '$name' joined the fleet"
+      success "machine '$name' joined the fleet"
     else
       warn "cloned OK but PUSH FAILED — if you used a deploy key it may be read-only; sync needs write access"
       warn "fix the key's access on the git host, then run 'satchel sync'"
@@ -757,7 +788,7 @@ cmd_init() {
   if confirm_yes "build the container image now? (a few minutes; otherwise it builds on first session)"; then
     build_image
   fi
-  info "done. try: cd <a project> && satchel claude"
+  success "done. try: cd <a project> && satchel claude"
 }
 
 # ----------------------------------------------------------------- import
@@ -803,9 +834,10 @@ write_setting() { # write_setting <file> <key> <value>
 cmd_settings() {
   local key="${1:-}" row k scope def help
   if [ -z "$key" ]; then
-    printf 'machine: %s    sync repo: %s    (change via satchel init / satchel retire)\n\n' \
-      "$MACHINE" "${SYNC_URL:-none}"
-    printf '%-28s %-22s %-8s %s\n' 'SETTING' 'VALUE' 'FROM' 'WHAT IT DOES'
+    printf '%smachine:%s %s    %ssync repo:%s %s    (change via satchel init / satchel retire)\n\n' \
+      "$OUT_BOLD$OUT_BLUE" "$OUT_RESET" "$MACHINE" "$OUT_BOLD$OUT_BLUE" "$OUT_RESET" \
+      "${SYNC_URL:-none}"
+    printf '%s%-28s %-22s %-8s %s%s\n' "$OUT_BOLD$OUT_BLUE" 'SETTING' 'VALUE' 'FROM' 'WHAT IT DOES' "$OUT_RESET"
     for row in "${SETTINGS_SPEC[@]}"; do
       IFS='|' read -r k scope def help <<< "$row"
       local val="${!k-}" src
@@ -866,10 +898,10 @@ cmd_retire() {
     for i in "${!names[@]}"; do
       marker=""
       [ "${names[$i]}" = "$MACHINE" ] && marker=" (this machine)"
-      printf '  %d) %s%s\n' "$((i + 1))" "${names[$i]}" "$marker" >&2
+      printf '  %s%d)%s %s%s\n' "$ERR_BOLD$ERR_BLUE" "$((i + 1))" "$ERR_RESET" "${names[$i]}" "$marker" >&2
     done
     local choice
-    read -r -p "retire which machine? [1-${#names[@]}, empty to cancel]: " choice
+    read -r -p "$(prompt_text "retire which machine? [1-${#names[@]}, empty to cancel]: ")" choice
     [ -n "$choice" ] || { info "cancelled"; return 0; }
     printf '%s' "$choice" | grep -Eq '^[0-9]+$' && [ "$choice" -ge 1 ] && [ "$choice" -le "${#names[@]}" ] \
       || die "not a valid choice: $choice"
@@ -908,7 +940,7 @@ cmd_retire() {
 # ----------------------------------------------------------------- status
 
 cmd_status() {
-  printf 'Satchel %s on %s\n' "$SATCHEL_VERSION" "$MACHINE"
+  out_header "Satchel $SATCHEL_VERSION on $MACHINE"
   local e img="not built"
   e="$(engine 2>/dev/null || true)"
   if [ -n "$e" ] && "$e" image inspect "$IMAGE" >/dev/null 2>&1; then
@@ -923,7 +955,7 @@ cmd_status() {
   else
     printf '  sync: %s\n' "$SYNC_URL"
     printf '  last sync commit: %s\n' "$(git_sync log -1 --format='%h %s (%cr)' 2>/dev/null || echo none)"
-    printf '\nFleet:\n'
+    printf '\n'; out_section 'Fleet:'
     local m d f slug date
     for m in "$SYNC_DIR"/machines/*/; do
       [ -d "$m" ] || continue
@@ -936,8 +968,8 @@ cmd_status() {
       done
     done
     local names; names="$(mcp_names | paste -sd, - | sed 's/,/, /g')"
-    printf '\nMCP servers: %s\n' "${names:-(none)}"
-    printf 'Skills:\n'
+    printf '\n%sMCP servers:%s %s\n' "$OUT_BOLD$OUT_BLUE" "$OUT_RESET" "${names:-(none)}"
+    out_section 'Skills:'
     local a s list
     for a in claude codex; do
       list=""
@@ -965,13 +997,13 @@ cmd_status() {
 
 # ----------------------------------------------------------------- doctor
 
-d_ok()   { printf '  ok    %s\n' "$*"; }
-d_warn() { printf '  warn  %s\n' "$*"; }
-d_fail() { printf '  FAIL  %s\n' "$*"; DOCTOR_PROBLEMS=$((DOCTOR_PROBLEMS + 1)); }
+d_ok()   { printf '  %sok%s    %s\n' "$OUT_GREEN" "$OUT_RESET" "$*"; }
+d_warn() { printf '  %swarn%s  %s\n' "$OUT_YELLOW" "$OUT_RESET" "$*"; }
+d_fail() { printf '  %sFAIL%s  %s\n' "$OUT_RED$OUT_BOLD" "$OUT_RESET" "$*"; DOCTOR_PROBLEMS=$((DOCTOR_PROBLEMS + 1)); }
 
 cmd_doctor() {
   DOCTOR_PROBLEMS=0
-  printf 'satchel %s doctor — machine %s\n' "$SATCHEL_VERSION" "$MACHINE"
+  out_header "satchel $SATCHEL_VERSION doctor — machine $MACHINE"
 
   local missing="" c
   for c in git jq curl ssh; do command -v "$c" >/dev/null 2>&1 || missing="$missing $c"; done
@@ -1084,7 +1116,7 @@ cmd_drift() {
   if diff -u --label "snapshot" --label "live" "$snap" "$live"; then
     info "no drift — '$name' matches its snapshot"
   else
-    echo
+    printf '\n'
     if confirm "container '$name' has drifted. restart it?"; then
       "$(engine)" restart "$name"
       info "restarted '$name'"
@@ -1133,9 +1165,8 @@ image_agent_versions() { # prints "claude X, codex Y" or nothing
 # ------------------------------------------------------------------- help
 
 cmd_help() {
+  out_header "Satchel $SATCHEL_VERSION — AI coding agents in disposable containers."
   cat <<EOF
-Satchel $SATCHEL_VERSION — AI coding agents in disposable containers.
-
 usage: satchel [--host] <command> [args]
 
 sessions
@@ -1204,7 +1235,7 @@ main() {
     snapshot)          cmd_snapshot "$@" ;;
     drift)             cmd_drift "$@" ;;
     update)            cmd_update "$@" ;;
-    version|--version) printf 'satchel %s\n' "$SATCHEL_VERSION" ;;
+    version|--version) out_header "satchel $SATCHEL_VERSION" ;;
     help|--help|-h)    cmd_help ;;
     *)                 die "unknown command '$cmd' — try 'satchel help'" ;;
   esac
