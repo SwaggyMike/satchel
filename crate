@@ -221,7 +221,16 @@ cmd_mcp() {
       ;;
     add)
       local name="${1:-}" url="${2:-}" auth="bearer"
-      [ -n "$name" ] && [ -n "$url" ] || die "usage: crate mcp add <name> <url> [--no-auth]"
+      # Bare 'crate mcp add' walks through it; args skip the questions.
+      if [ -z "$name" ]; then
+        read -r -p "  server name (e.g. homeassistant): " name
+        [ -n "$name" ] || { info "cancelled"; return 0; }
+      fi
+      if [ -z "$url" ]; then
+        read -r -p "  server URL (e.g. http://host:8123/api/mcp): " url
+        [ -n "$url" ] || { info "cancelled"; return 0; }
+        if ! confirm_yes "  does it need a bearer token?"; then auth="none"; fi
+      fi
       [ "${3:-}" = "--no-auth" ] && auth="none"
       printf '%s' "$name" | grep -Eq '^[a-zA-Z0-9_-]+$' || die "server name must be [a-zA-Z0-9_-]"
       [ -f "$MCP_FILE" ] || printf '{ "servers": {} }\n' > "$MCP_FILE"
@@ -1072,7 +1081,8 @@ fleet
 
 setup
   crate import claude|codex  copy this host's agent login into crate's sessions
-  crate mcp list|add|remove  manage the MCP Registry (synced to every machine)
+  crate mcp list|add|remove  manage the MCP Registry (synced to every machine);
+                             bare 'crate mcp add' asks for everything step by step
   crate settings             show every setting; 'crate settings <KEY> <value>'
                              sets it fleet-wide (--local: this machine only)
 
