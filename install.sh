@@ -49,7 +49,11 @@ done
 
 case ":$PATH:" in
   *":$BIN:"*) : ;;
-  *) say "NOTE: $BIN is not on your PATH — add it to your shell profile" ;;
+  *)
+    say "NOTE: $BIN is not on your PATH yet."
+    say "  run:  export PATH=\"$BIN:\$PATH\""
+    say "  (on Debian/Ubuntu a fresh login picks it up automatically once the directory exists)"
+    ;;
 esac
 
 say "done. next: crate init"
