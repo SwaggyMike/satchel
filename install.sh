@@ -12,6 +12,17 @@ RAW="https://raw.githubusercontent.com/SwaggyMike/satchel"
 say() { printf 'install: %s\n' "$*" >&2; }
 die() { printf 'install: error: %s\n' "$*" >&2; exit 1; }
 
+# Unraid-only messages get their own color and prefix: they concern the
+# flash-backed boot config, not the normal install flow, and should be
+# recognizable as such at a glance.
+if [ -t 2 ] && [ "${TERM:-}" != dumb ] && [ -z "${NO_COLOR:-}" ]; then
+  U_ON=$'\033[1;33m'; U_OFF=$'\033[0m'
+else
+  U_ON=""; U_OFF=""
+fi
+usay() { printf '%s%s%s\n' "$U_ON" "install (unraid): $*" "$U_OFF" >&2; }
+uask() { printf '%s%s%s' "$U_ON" "install (unraid): $*" "$U_OFF" >&2; }
+
 command -v curl >/dev/null 2>&1 || die "curl is required"
 command -v git  >/dev/null 2>&1 || die "git is required"
 command -v jq   >/dev/null 2>&1 || die "jq is required"
@@ -28,8 +39,8 @@ command -v docker >/dev/null 2>&1 || command -v podman >/dev/null 2>&1 \
 if [ -z "${SATCHEL_BIN:-}" ] && [ -f /etc/unraid-version ]; then
   default_bin=/mnt/user/appdata/satchel
   if { : </dev/tty; } 2>/dev/null; then
-    say "Unraid detected — / is rebuilt at every boot, so a default install would vanish."
-    printf 'install: install directory [%s]: ' "$default_bin" >&2
+    usay "Unraid detected — / is rebuilt at every boot, so a default install would vanish."
+    uask "install directory [$default_bin]: "
     IFS= read -r answer </dev/tty || answer=""
     SATCHEL_BIN="${answer:-$default_bin}"
   else
@@ -102,9 +113,9 @@ if [ -f /etc/unraid-version ] && [ "$BIN" != /usr/local/bin ]; then
   marker="# >>> satchel boot persistence >>>"
   add_go=n
   if grep -qsF "$marker" "$go"; then
-    say "boot persistence already set up in $go"
+    usay "boot persistence already set up in $go"
   elif { : </dev/tty; } 2>/dev/null; then
-    printf 'install: add boot persistence to %s (PATH links + sync SSH key restore)? [Y/n] ' "$go" >&2
+    uask "add boot persistence to $go (PATH links + sync SSH key restore)? [Y/n] "
     IFS= read -r reply </dev/tty || reply=""
     case "$reply" in [Nn]*) : ;; *) add_go=y ;; esac
   fi
@@ -118,13 +129,13 @@ if [ -f /etc/unraid-version ] && [ "$BIN" != /usr/local/bin ]; then
       printf 'cp /boot/config/ssh/root/id_ed25519* /root/.ssh/ 2>/dev/null && chmod 600 /root/.ssh/id_ed25519\n'
       printf '# <<< satchel boot persistence <<<\n'
     } >> "$go"
-    say "added boot persistence to $go"
+    usay "added boot persistence to $go"
     # Make this boot look like the next one will.
     ln -sf "$BIN/satchel" ${shims_installed[@]+"${shims_installed[@]}"} /usr/local/bin/ 2>/dev/null || true
   elif ! grep -qsF "$marker" "$go"; then
-    say "NOTE: to survive reboots, add to $go:"
-    say "  ln -sf $BIN/satchel ${shims_installed[*]-} /usr/local/bin/"
-    say "  (and persist the sync SSH key — see the Unraid section of the README)"
+    usay "NOTE: to survive reboots, add to $go:"
+    usay "  ln -sf $BIN/satchel ${shims_installed[*]-} /usr/local/bin/"
+    usay "  (and persist the sync SSH key — see the Unraid section of the README)"
   fi
 else
   case ":$PATH:" in
