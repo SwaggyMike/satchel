@@ -29,6 +29,15 @@ printf '<!-- satchel-machine-baseline version=1 generated=2026-07-22T00:00:00Z -
 
 mkdir -p "$tmp/claude/.claude" "$tmp/codex/.codex"
 ! baseline_authenticated claude "$tmp/claude"
+# A .claude.json holding only materialized MCP config is not a login...
+printf '{ "mcpServers": { "x": { "url": "http://x" } } }\n' > "$tmp/claude/.claude.json"
+! baseline_authenticated claude "$tmp/claude"
+# ...but auth material inside it is (API-key imports have no .credentials.json).
+printf '{ "primaryApiKey": "not-a-real-key" }\n' > "$tmp/claude/.claude.json"
+baseline_authenticated claude "$tmp/claude"
+printf '{ "oauthAccount": { "emailAddress": "user@example.test" } }\n' > "$tmp/claude/.claude.json"
+baseline_authenticated claude "$tmp/claude"
+rm "$tmp/claude/.claude.json"
 touch "$tmp/claude/.claude/.credentials.json" "$tmp/codex/.codex/auth.json"
 baseline_authenticated claude "$tmp/claude"
 baseline_authenticated codex "$tmp/codex"

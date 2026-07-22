@@ -1094,9 +1094,15 @@ baseline_marker_version() {
 
 baseline_authenticated() { # baseline_authenticated <claude|codex> <agent-home>
   case "$1" in
-    # .claude.json is ordinary configuration and may be materialized before
-    # login; the credentials file is the durable proof that login completed.
-    claude) [ -f "$2/.claude/.credentials.json" ] ;;
+    # A logged-in claude home has .claude/.credentials.json (OAuth) or auth
+    # material inside .claude.json (API key, or the OAuth account record).
+    # Plain existence of .claude.json proves nothing — materialize_mcp
+    # writes one before any login.
+    claude)
+      [ -f "$2/.claude/.credentials.json" ] && return 0
+      [ -f "$2/.claude.json" ] || return 1
+      jq -e '(.oauthAccount // .primaryApiKey // "") | length > 0' "$2/.claude.json" >/dev/null 2>&1
+      ;;
     codex)  [ -f "$2/.codex/auth.json" ] ;;
   esac
 }
@@ -1217,8 +1223,9 @@ offer_baseline_refresh() {
     local reply
     read -r -p "$(prompt_text "agent [claude/codex] [claude]: ")" reply
     case "$reply" in [cC]odex) agent=codex ;; *) agent=claude ;; esac
-  elif [ "$ca" -eq 1 ]; then agent=claude
-  else agent=codex
+  # A silent single-agent pick looks like a wrong default; say why.
+  elif [ "$ca" -eq 1 ]; then agent=claude; info "using claude — codex is not logged in on this machine"
+  else agent=codex; info "using codex — claude is not logged in on this machine"
   fi
   ensure_image
   rm -f "$(baseline_skip_file)"
