@@ -14,6 +14,14 @@ source <(sed '$d' "$repo_dir/satchel")
 load_config
 ENGINE=docker
 
+# Init can detect an image that was just built and avoid asking to rebuild it.
+fake_engine="$tmp/fake-engine"
+printf '#!/usr/bin/env bash\n[ "$1 $2" = "image inspect" ]\n' > "$fake_engine"
+chmod 755 "$fake_engine"
+ENGINE="$fake_engine"
+image_exists
+ENGINE=docker
+
 notes="$(baseline_notes_file)"
 [ -z "$(baseline_marker_version)" ]
 printf '<!-- satchel-machine-baseline version=1 generated=2026-07-22T00:00:00Z -->\n# Machine baseline\n' > "$notes"

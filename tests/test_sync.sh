@@ -64,4 +64,16 @@ grep -q eight <(git_sync show --stat --format= HEAD)
 ! grep -q seven <(git_sync show --stat --format= HEAD)
 [ "$(origin_head)" = "$(git_sync rev-parse HEAD)" ]
 
+# Re-running init on a stale clone must integrate another machine's commit
+# before pushing its own registration, rather than misdiagnosing the normal
+# non-fast-forward rejection as a read-only deploy key.
+git -C "$other" pull -q --rebase
+git -C "$other" -c user.name=o -c user.email=o@o commit -q --allow-empty -m "remote before re-init"
+git -C "$other" push -q origin main
+touch "$SYNC_DIR/nine"
+sync_machine_registration testbox
+grep -q "remote before re-init" <(git_sync log --oneline)
+grep -q nine <(git_sync show --stat --format= HEAD)
+[ "$(origin_head)" = "$(git_sync rev-parse HEAD)" ]
+
 printf 'ok: sync commit rollup\n'
