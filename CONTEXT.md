@@ -13,7 +13,7 @@ A tiny wrapper command named `claude` or `codex` on the host PATH that execs `sa
 _Avoid_: alias, symlink
 
 **Session**:
-A single run of an agent CLI inside a throwaway Docker container, scoped to one directory. The container is deleted when the session ends. A directory becomes a Project only after the user opts in.
+A single run of an agent CLI inside a throwaway Docker container, scoped to one directory (plus any extra directories named with repeatable `--with` flags, for work that spans repos - identity and the handoff stay with the launch directory). The container is deleted when the session ends. A directory becomes a Project only after the user opts in.
 _Avoid_: workspace, environment
 
 **Project**:

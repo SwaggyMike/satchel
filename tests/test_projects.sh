@@ -49,6 +49,21 @@ grep -q 'USE PODMAN NOT DOCKER ON TESTBOX' "$tmp/home_c/.claude/CLAUDE.md"
 write_memory_file claude "$tmp/home_c" sample "$tmp/work/app" 2>/dev/null
 grep -q 'USE PODMAN NOT DOCKER ON TESTBOX' "$tmp/home_c/.claude/CLAUDE.md"
 
+# --with: extras are validated, normalized, mounted at their real paths,
+# and listed in the preamble; home and / are refused.
+wd="$(readlink -f "$tmp/work/downloads")"
+WITH_DIRS=("$tmp/work/downloads/../downloads")
+with_dirs_guard
+[ "${WITH_DIRS[0]}" = "$wd" ]
+compose_run_args claude "$tmp/home_c" "$tmp/work/app"
+[[ " ${RUN_ARGS[*]} " == *" $wd:$wd "* ]]
+write_memory_file claude "$tmp/home_c" sample "$tmp/work/app" 2>/dev/null
+grep -q "$wd" "$tmp/home_c/.claude/CLAUDE.md"
+WITH_DIRS=("$HOME");           ! (with_dirs_guard 2>/dev/null)
+WITH_DIRS=("$tmp/no-such-dir"); ! (with_dirs_guard 2>/dev/null)
+WITH_DIRS=(/);                 ! (with_dirs_guard 2>/dev/null)
+WITH_DIRS=()
+
 # The mount guard still hard-refuses home and / without a tty.
 HOST_MODE=0 UNSAFE_HOME=0
 ! (cd "$HOME" && session_mount_guard claude </dev/null 2>/dev/null)

@@ -38,6 +38,12 @@ Sessions that stay outside any project (a Host Session in /root, say) still
 write a handoff, kept per machine and loaded by the next such session there.
 Use `satchel track [name]` or `satchel untrack` to change the choice.
 
+Working across repos that influence each other? `satchel claude --with
+../other-repo` mounts the extra directory alongside the project (repeat the
+flag for more). The session's identity and handoff stay with the directory
+you launched in; home directories and / are refused as extras, same as the
+primary mount.
+
 Each machine also has notes (`machines/<name>/notes.md` in the sync repo):
 durable facts and procedures for that machine, shown to every session on it
 and editable from inside any session at `~/machine/notes.md`. Agents record

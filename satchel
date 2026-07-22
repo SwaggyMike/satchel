@@ -33,6 +33,7 @@ SATCHEL_UID=""
 SATCHEL_GID=""
 HOST_MODE=0
 UNSAFE_HOME=0
+WITH_DIRS=()
 ENGINE=""
 
 # ---------------------------------------------------------------- helpers
@@ -639,7 +640,7 @@ latest_handoff() { # latest_handoff <project-id> → prints newest handoff
 # mode — the agent can't know on its own that /etc belongs to a disposable
 # container, or that a Host Session's real /etc lives under /host.
 write_memory_file() { # write_memory_file <agent> <home> <slug> <project>
-  local agent="$1" home="$2" slug="$3" project="$4" target handoff from context=""
+  local agent="$1" home="$2" slug="$3" project="$4" target handoff from w context=""
   case "$agent" in
     claude) target="$home/.claude/CLAUDE.md" ;;
     codex)  target="$home/.codex/AGENTS.md" ;;
@@ -672,6 +673,10 @@ project directory, you cannot see the machine's copy — say it is outside the
 sandbox rather than reporting it does not exist. (Reaching the machine
 itself takes a Host Session: restart with --host.)
 EOF
+      if [ ${#WITH_DIRS[@]} -gt 0 ]; then
+        printf '\nAlso mounted read-write at their real paths, as part of this working set (--with):\n'
+        for w in "${WITH_DIRS[@]}"; do printf -- '- %s\n' "$w"; done
+      fi
       case "${SSH_STATE:=$(ssh_agent_state)}" in
         ready) cat <<'EOF'
 
@@ -952,6 +957,15 @@ compose_run_args() { # compose_run_args <agent> <home> <project>
     RUN_ARGS+=(-e "GIT_SSH_COMMAND=ssh -o StrictHostKeyChecking=accept-new")
   fi
   RUN_ARGS+=(-v "$project:$project" -w "$project")
+  # Host Sessions skip the extras: everything is already under /host, and a
+  # real repo at a bare path would contradict "bare paths are throwaway".
+  local w
+  if [ "$HOST_MODE" -eq 0 ]; then
+    for w in "${WITH_DIRS[@]}"; do
+      [ "$w" = "$project" ] && continue
+      RUN_ARGS+=(-v "$w:$w")
+    done
+  fi
   if [ "$HOST_MODE" -eq 1 ]; then
     # Host Session: the container is packaging, not protection (CONTEXT.md).
     RUN_ARGS+=(--privileged --pid=host --network=host --user 0:0 -v /:/host)
@@ -1008,22 +1022,44 @@ session_mount_guard() {
        cd into a project directory, or run 'satchel --unsafe-home $1' if you really mean it."
 }
 
+# --with mounts extra project directories into the session, for work that
+# spans repos. Same promise as the primary mount: never a home directory
+# or /, no matter the flags. Paths are normalized so the mount, the
+# preamble, and the in-session paths all agree.
+with_dirs_guard() {
+  local i w
+  for i in "${!WITH_DIRS[@]}"; do
+    w="$(readlink -f "${WITH_DIRS[$i]}" 2>/dev/null)" || w=""
+    [ -n "$w" ] && [ -d "$w" ] || die "--with ${WITH_DIRS[$i]}: not a directory"
+    [ "$w" = / ] && die "--with ${WITH_DIRS[$i]}: refusing to mount /"
+    case "$(readlink -f "$HOME")" in
+      "$w"|"$w"/*) die "--with $w: refusing to mount your home directory (SSH keys, MCP tokens, logins)" ;;
+    esac
+    WITH_DIRS[$i]="$w"
+  done
+  return 0
+}
+
 cmd_session() {
   local agent="$1"; shift
   # Satchel's own flags also work after the agent name, so the shims feel like
   # the real CLIs: 'claude --host' == 'satchel --host claude'. Neither agent
   # has flags by these names, so plucking them out is unambiguous.
-  local a args=()
-  for a in "$@"; do
-    case "$a" in
+  local args=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
       --host)        HOST_MODE=1 ;;
       --unsafe-home) UNSAFE_HOME=1 ;;
-      *)             args+=("$a") ;;
+      --with)        [ -n "${2:-}" ] || die "--with needs a directory"
+                     WITH_DIRS+=("$2"); shift ;;
+      *)             args+=("$1") ;;
     esac
+    shift
   done
   set -- "${args[@]}"
   need_cmd git; need_cmd jq
   session_mount_guard "$agent"
+  with_dirs_guard
   ensure_image
   local project="$PWD" slug home decision
   home="$HOMES_DIR/$agent"
@@ -1054,10 +1090,16 @@ cmd_session() {
   # (sandboxed / host) are the two facts the human otherwise has to infer.
   if [ "$HOST_MODE" -eq 1 ]; then
     warn "HOST SESSION - no sandbox, you are root. The machine's real files are under /host; bare paths like /etc are the container's throwaway copies"
-  elif [ -n "$slug" ]; then
-    info "sandboxed session - project '$slug', only this directory is mounted"
   else
-    info "sandboxed session - untracked directory, handoff will save under machine '$MACHINE'"
+    local scope="untracked directory, handoff will save under machine '$MACHINE'"
+    [ -n "$slug" ] && scope="project '$slug'"
+    if [ ${#WITH_DIRS[@]} -gt 0 ]; then
+      info "sandboxed session - $scope, with ${#WITH_DIRS[@]} extra dir(s) mounted (--with)"
+    elif [ -n "$slug" ]; then
+      info "sandboxed session - $scope, only this directory is mounted"
+    else
+      info "sandboxed session - $scope"
+    fi
   fi
 
   # A handoff is only worth writing if a conversation actually happened —
@@ -1653,7 +1695,9 @@ sessions
                              (troubleshooting the machine itself — see CONTEXT.md)
   --unsafe-home              allow a session in \$HOME or above (mounts it ALL,
                              SSH keys and tokens included — normally refused)
-                             both flags work before or after the agent name:
+  --with <dir>               mount an extra directory alongside the project
+                             (repeatable - for repos that influence each other)
+                             flags work before or after the agent name:
                              'satchel --host claude' == 'claude --host'
   satchel track [name]         track the current directory as a project
   satchel untrack              stop tracking the current directory on this machine
@@ -1706,6 +1750,8 @@ main() {
     case "${1:-}" in
       --host)        HOST_MODE=1; shift ;;
       --unsafe-home) UNSAFE_HOME=1; shift ;;
+      --with)        [ -n "${2:-}" ] || die "--with needs a directory"
+                     WITH_DIRS+=("$2"); shift 2 ;;
       *) break ;;
     esac
   done
