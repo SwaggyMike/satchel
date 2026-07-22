@@ -30,7 +30,14 @@ at `/host`). The host's ssh-agent is forwarded in as a socket, so `git push`
 works in-session while key files never enter the container (the
 `SATCHEL_SSH` setting turns it off — see ADR 0005). Log in once (or `satchel import claude` to
 copy the host's login); every session after that starts authenticated. After
-the first meaningful session in a new directory, Satchel asks once whether
+an agent has authenticated, its next normal launch offers to build baseline
+machine notes. If accepted, the agent inspects the real host through a
+read-only `/host` mount, shows its proposed notes for approval, writes only
+to the machine notes, and then continues into the session you originally
+requested. The prompt can be deferred or disabled; `satchel init` offers a
+later refresh for an already-initialized machine.
+
+After the first meaningful session in a new directory, Satchel asks once whether
 to track it as a project. If accepted, the agent writes a short handoff; the
 next session on that project — on any machine — picks it up. Rejected paths
 are remembered on that machine and their child directories remain eligible.

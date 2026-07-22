@@ -35,6 +35,8 @@ HOST_MODE=0
 UNSAFE_HOME=0
 WITH_DIRS=()
 ENGINE=""
+BASELINE_VERSION=1
+SYNC_BLOCK_REASON=""
 
 # ---------------------------------------------------------------- helpers
 
@@ -83,6 +85,16 @@ confirm_yes() { # default yes (for asks almost everyone wants)
   local reply
   read -r -p "$(prompt_text "$1 [Y/n] ")" reply
   [[ ! "$reply" == [nN]* ]]
+}
+
+choose_baseline() { # yes | later | never; baseline access is privileged enough to default later
+  local reply
+  read -r -p "$(prompt_text "this machine has no baseline notes; inspect it read-only now? [y]es/[N]ot now/[d]on't ask again: ")" reply
+  case "$reply" in
+    [yY]*) printf 'yes' ;;
+    [dD]*) printf 'never' ;;
+    *)     printf 'later' ;;
+  esac
 }
 
 need_cmd() {
@@ -1025,6 +1037,137 @@ update_check() {
   return 0
 }
 
+# ------------------------------------------------------ machine baseline
+
+baseline_notes_file() { printf '%s/machines/%s/notes.md' "$SYNC_DIR" "$MACHINE"; }
+baseline_skip_file()  { printf '%s/machines/%s/.baseline-skip' "$SYNC_DIR" "$MACHINE"; }
+
+baseline_marker_version() {
+  local f; f="$(baseline_notes_file)"
+  [ -f "$f" ] || return 0
+  sed -n '1s/^<!-- satchel-machine-baseline version=\([0-9][0-9]*\) generated=[^ ]* -->$/\1/p' "$f"
+}
+
+baseline_authenticated() { # baseline_authenticated <claude|codex> <agent-home>
+  case "$1" in
+    # .claude.json is ordinary configuration and may be materialized before
+    # login; the credentials file is the durable proof that login completed.
+    claude) [ -f "$2/.claude/.credentials.json" ] ;;
+    codex)  [ -f "$2/.codex/auth.json" ] ;;
+  esac
+}
+
+baseline_added_lines() { # baseline_added_lines <old-file> <new-file>
+  diff -u "$1" "$2" 2>/dev/null | sed -n '/^+++ /d; /^+/s/^+//p' || true
+}
+
+baseline_secret_scan() { # baseline_secret_scan <old-file> <new-file>
+  local added
+  added="$(baseline_added_lines "$1" "$2")"
+  [ -z "$added" ] && return 0
+  # Deliberately conservative and scoped only to newly-added lines. Do not
+  # echo matches: a warning must never become another place a secret leaks.
+  if printf '%s\n' "$added" | grep -Eiq \
+    -- 'BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY|(^|[^A-Za-z])(password|passwd|secret|token|api[_-]?key)[[:space:]]*[:=][[:space:]]*[^[:space:]<]|https?://[^/@[:space:]]+:[^/@[:space:]]+@|Bearer[[:space:]]+[A-Za-z0-9._~+/-]{16,}'; then
+    return 1
+  fi
+  if printf '%s\n' "$added" | grep -Eq -- '(^|[^A-Fa-f0-9])[A-Fa-f0-9]{48,}([^A-Fa-f0-9]|$)|(^|[^A-Za-z0-9+/])[A-Za-z0-9+/]{64,}={0,2}([^A-Za-z0-9+/]|$)'; then
+    return 1
+  fi
+  return 0
+}
+
+compose_baseline_run_args() { # compose_baseline_run_args <agent> <home>
+  local agent="$1" home="$2"
+  RUN_ARGS=(--init -e HOME=/home/satchel -e "TERM=${TERM:-xterm-256color}" -e DISABLE_AUTOUPDATER=1)
+  RUN_ARGS+=(-v "$home:/home/satchel")
+  mkdir -p "$SYNC_DIR/machines/$MACHINE"
+  RUN_ARGS+=(-v "$SYNC_DIR/machines/$MACHINE:/home/satchel/machine")
+  RUN_ARGS+=(-v "/:/host:ro" -w /home/satchel)
+  RUN_ARGS+=(--user "$SATCHEL_UID:$SATCHEL_GID" --cap-drop ALL --security-opt no-new-privileges)
+  if selinux_active; then RUN_ARGS+=(--security-opt label=disable); fi
+  if podman_rootless; then RUN_ARGS+=(--userns=keep-id); fi
+}
+
+run_machine_baseline() { # run_machine_baseline <agent> <home>
+  local agent="$1" home="$2" notes before prompt rc=0
+  notes="$(baseline_notes_file)"; mkdir -p "$(dirname "$notes")"
+  before="$(mktemp)"; [ -f "$notes" ] && cp "$notes" "$before" || : > "$before"
+  prompt="Satchel machine-baseline onboarding, version $BASELINE_VERSION. Inspect this machine conservatively and read-only. The real host filesystem is mounted at /host; the container's bare /etc, /var, and similar paths are disposable and are not the host. You cannot and must not change the host, install packages, restart services, or use control sockets.
+
+Build concise, curated machine knowledge covering identity and OS, hardware, storage and filesystems, networking, configured services, containers and major workloads, administration/development tools, machine-specific procedures, and known constraints. Distinguish live observations from configuration inferred from files when it matters. Never record passwords, tokens, keys, cookies, complete environment dumps, credential-bearing URLs, or secret values. Do not paste raw command output.
+
+First inspect and then show the user the exact baseline you propose. Do not write anything until the user approves it. After approval, merge it with any correct existing notes at /home/satchel/machine/notes.md; update verified stale facts, but never blindly replace useful notes. Put this exact machine-readable marker on line 1, substituting the current UTC time for TIMESTAMP:
+<!-- satchel-machine-baseline version=$BASELINE_VERSION generated=TIMESTAMP -->
+Use an initial structure of Identity and OS, Hardware, Storage and filesystems, Network, Services, Containers and workloads, Development and administration tools, Machine-specific procedures, and Known constraints and quirks, omitting empty sections. The structure may evolve later."
+  compose_baseline_run_args "$agent" "$home"
+  local tty=() launch
+  [ -t 0 ] && tty=(-it)
+  case "$agent" in
+    claude) launch=(claude "$prompt") ;;
+    codex)  launch=(codex -c 'sandbox_mode="danger-full-access"' -c check_for_update_on_startup=false "$prompt") ;;
+  esac
+  warn "BASELINE INSPECTION - the real machine is visible at /host read-only; only synced machine notes are writable"
+  "$(engine)" run --rm "${tty[@]}" "${RUN_ARGS[@]}" "$IMAGE" "${launch[@]}" || rc=$?
+
+  if [ ! -f "$notes" ] || cmp -s "$before" "$notes" 2>/dev/null; then
+    warn "machine baseline was not written; onboarding remains incomplete"
+    [ "$rc" -eq 0 ] || warn "baseline agent exited with status $rc; continuing to the requested session"
+    rm -f "$before"; return 0
+  fi
+  if [ "$(baseline_marker_version)" != "$BASELINE_VERSION" ]; then
+    SYNC_BLOCK_REASON="machine notes changed without a valid baseline marker"
+    warn "$SYNC_BLOCK_REASON; automatic sync is disabled until the notes are reviewed"
+    rm -f "$before"; return 0
+  fi
+  if ! baseline_secret_scan "$before" "$notes"; then
+    SYNC_BLOCK_REASON="the baseline notes contain a possible secret in newly-added content"
+    warn "$SYNC_BLOCK_REASON; no suspected value was printed and automatic sync is disabled"
+    rm -f "$before"; return 0
+  fi
+  rm -f "$before"
+  quiet_push "machine baseline v$BASELINE_VERSION on $MACHINE"
+  success "machine baseline saved to the private Sync Repo"
+  return 0
+}
+
+maybe_offer_baseline() { # maybe_offer_baseline <agent> <home>
+  local agent="$1" home="$2" choice skip
+  [ "$HOST_MODE" -eq 0 ] || return 0
+  sync_ready && [ -t 0 ] && baseline_authenticated "$agent" "$home" || return 0
+  [ -z "$(baseline_marker_version)" ] || return 0
+  skip="$(baseline_skip_file)"; [ -f "$skip" ] && return 0
+  choice="$(choose_baseline)"
+  case "$choice" in
+    yes) run_machine_baseline "$agent" "$home" ;;
+    never)
+      printf 'suppressed at %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$skip"
+      quiet_push "skip machine baseline on $MACHINE"
+      info "machine-baseline reminder disabled; remove ${skip#"$SYNC_DIR"/} to restore it"
+      ;;
+  esac
+}
+
+offer_baseline_refresh() {
+  sync_ready && [ -t 0 ] || return 0
+  local ca=0 co=0 agent="" action="build"
+  baseline_authenticated claude "$HOMES_DIR/claude" && ca=1
+  baseline_authenticated codex "$HOMES_DIR/codex" && co=1
+  [ "$ca" -eq 1 ] || [ "$co" -eq 1 ] || return 0
+  [ -n "$(baseline_marker_version)" ] && action="refresh"
+  confirm "$action the curated machine baseline now (host filesystem is read-only)?" || return 0
+  if [ "$ca" -eq 1 ] && [ "$co" -eq 1 ]; then
+    local reply
+    read -r -p "$(prompt_text "agent [claude/codex] [claude]: ")" reply
+    case "$reply" in [cC]odex) agent=codex ;; *) agent=claude ;; esac
+  elif [ "$ca" -eq 1 ]; then agent=claude
+  else agent=codex
+  fi
+  ensure_image
+  rm -f "$(baseline_skip_file)"
+  run_machine_baseline "$agent" "$HOMES_DIR/$agent"
+}
+
 # --------------------------------------------------------------- sessions
 
 RUN_ARGS=()
@@ -1189,6 +1332,14 @@ cmd_session() {
   update_check
   slug="$(project_for_path "$project")"
 
+  # Authentication normally happens inside an agent's first session. On the
+  # next launch, offer a safe machine baseline before continuing into the
+  # exact session the user originally requested.
+  case "${1:-}" in
+    --version|-v|--help|-h) ;;
+    *) maybe_offer_baseline "$agent" "$home" ;;
+  esac
+
   # First-run convenience: agents want a git identity for project commits.
   [ ! -f "$home/.gitconfig" ] && [ -f "$HOME/.gitconfig" ] && cp "$HOME/.gitconfig" "$home/.gitconfig"
 
@@ -1273,7 +1424,11 @@ cmd_session() {
     fi
     # Push regardless of the handoff: a session may have installed skills or
     # edited synced files even without a handoff to write.
-    quiet_push "session: ${slug:-untracked} on $MACHINE"
+    if [ -z "$SYNC_BLOCK_REASON" ]; then
+      quiet_push "session: ${slug:-untracked} on $MACHINE"
+    else
+      warn "automatic sync skipped: $SYNC_BLOCK_REASON; review machine notes, then run 'satchel sync'"
+    fi
   fi
   rm -f "$stamp"
   return "$rc"
@@ -1339,7 +1494,8 @@ cmd_init() {
   need_cmd git; need_cmd jq; engine >/dev/null
   mkdir -p "$SATCHEL_DIR" && chmod 700 "$SATCHEL_DIR"
 
-  local name url
+  local name url was_initialized=0
+  sync_ready && was_initialized=1
   read -r -p "$(prompt_text "machine name [$MACHINE]: ")" name
   name="$(slugify "${name:-$MACHINE}")"
   read -r -p "$(prompt_text "sync repo URL (private git repo; empty to skip sync for now)${SYNC_URL:+ [$SYNC_URL]}: ")" url
@@ -1431,6 +1587,7 @@ cmd_init() {
   if confirm_yes "build the container image now? (a few minutes; otherwise it builds on first session)"; then
     build_image
   fi
+  [ "$was_initialized" -eq 0 ] || offer_baseline_refresh
   success "done. try: cd <a project> && satchel claude"
 }
 
@@ -1594,6 +1751,18 @@ cmd_status() {
   else
     printf '  sync: %s\n' "$SYNC_URL"
     printf '  last sync commit: %s\n' "$(git_sync log -1 --format='%h %s (%cr)' 2>/dev/null || echo none)"
+    local bv; bv="$(baseline_marker_version)"
+    if [ -z "$bv" ]; then
+      if [ -f "$(baseline_skip_file)" ]; then
+        printf '  machine baseline: not built (reminder disabled)\n'
+      else
+        printf '  machine baseline: missing (offered after an authenticated agent launch)\n'
+      fi
+    elif [ "$bv" -lt "$BASELINE_VERSION" ]; then
+      printf '  machine baseline: version %s; version %s is available (run satchel init to refresh)\n' "$bv" "$BASELINE_VERSION"
+    else
+      printf '  machine baseline: version %s\n' "$bv"
+    fi
     printf '\n'; out_section 'Fleet:'
     local m mh f
     for m in "$SYNC_DIR"/machines/*/; do

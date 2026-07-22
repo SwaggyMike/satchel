@@ -38,6 +38,9 @@ _Avoid_: summary, checkpoint, state file
 
 **Machine Notes**:
 Curated current truth about one machine (`machines/<name>/notes.md` in the Sync Repo): the blessed way to do machine-specific tasks, quirks, conventions. Mounted read-write into every session on that machine (`/home/satchel/machine/notes.md` — an absolute path on purpose: Host Sessions run as root, where `~` resolves wrong) and injected into the session preamble; agents record durable facts as they discover them and fix or delete entries that turn out stale. Complements Handoffs: the handoff is the baton for the current work, notes are what stays true between sessions.
+
+**Machine Baseline**:
+An optional first inventory of Machine Notes, offered on the first normal agent launch after that agent authenticates. The chosen agent sees the host at `/host` through a read-only bind mount, proposes curated notes for human approval, and can write only the synced machine-notes directory (plus its ordinary local agent state). A versioned marker on the first line records successful completion; this is onboarding and refresh machinery, not a schema imposed on later notes.
 _Avoid_: journal, log (notes are kept short and current, not appended forever)
 
 **Host Session**:
