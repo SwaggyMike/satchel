@@ -40,9 +40,13 @@ Use `satchel track [name]` or `satchel untrack` to change the choice.
 
 Working across repos that influence each other? `satchel claude --with
 ../other-repo` mounts the extra directory alongside the project (repeat the
-flag for more). The session's identity and handoff stay with the directory
-you launched in; home directories and / are refused as extras, same as the
-primary mount.
+flag for more); home directories and / are refused as extras, same as the
+primary mount. You can also just launch from a parent directory that holds
+several tracked projects. Either way, work is filed by where it happened:
+at session end each tracked project you touched gets its own handoff, and
+work outside every project goes under the machine. Multi-project sessions
+see the list of visible projects and read each one's latest handoff on
+demand instead of loading them all up front.
 
 Each machine also has notes (`machines/<name>/notes.md` in the sync repo):
 durable facts and procedures for that machine, shown to every session on it

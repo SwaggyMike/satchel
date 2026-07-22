@@ -13,7 +13,7 @@ A tiny wrapper command named `claude` or `codex` on the host PATH that execs `sa
 _Avoid_: alias, symlink
 
 **Session**:
-A single run of an agent CLI inside a throwaway Docker container, scoped to one directory (plus any extra directories named with repeatable `--with` flags, for work that spans repos - identity and the handoff stay with the launch directory). The container is deleted when the session ends. A directory becomes a Project only after the user opts in.
+A single run of an agent CLI inside a throwaway Docker container, scoped to one directory (plus any extra directories named with repeatable `--with` flags, for work that spans repos). The container is deleted when the session ends. A directory becomes a Project only after the user opts in; work is attributed to whichever tracked Project's directory it happened in, regardless of where the session was launched.
 _Avoid_: workspace, environment
 
 **Project**:
@@ -33,7 +33,7 @@ The folder of agent skills carried whole in the Sync Repo, shared by both agents
 _Avoid_: plugins, marketplace
 
 **Handoff**:
-A short markdown summary (goal, done, in-flight, next steps, gotchas) written automatically after a meaningful session, and injected into the next session's starting context — including on another machine. Sessions in a tracked Project write to `projects/<id>/handoffs/`; sessions outside any project (Host Sessions fixing the machine itself, mostly) write to `machines/<name>/handoffs/`, scoped to that machine. Semantic continuity, as opposed to literal transcript replay.
+A short markdown summary (goal, done, in-flight, next steps, gotchas) written automatically after a meaningful session, and injected into the next session's starting context — including on another machine. Filing follows the attribution rule: one handoff per tracked Project the session actually worked in, written to `projects/<id>/handoffs/`, no matter how the session was launched (parent directory, `--with` extras, Host Session). Work outside every tracked Project (fixing the machine itself, mostly) goes to `machines/<name>/handoffs/`, scoped to that machine. A session that can see several projects gets a list of them and reads the relevant handoff on demand from the read-only `~/projects` mount, rather than having every project's context inlined. Semantic continuity, as opposed to literal transcript replay.
 _Avoid_: summary, checkpoint, state file
 
 **Machine Notes**:

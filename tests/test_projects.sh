@@ -80,4 +80,43 @@ reject_project_path "$tmp/work/downloads"
 is_utility_root "$HOME"
 ! is_utility_root "$tmp/work/downloads/important"
 
+# Path-based attribution: visible_projects enumerates roster entries under
+# the mounts, at any depth; a Host Session sees every tracked project.
+mkdir -p "$tmp/work/nested/app2"
+id2="$(enroll_project "$tmp/work/nested/app2" sample2)"
+[ "$id2" = sample2 ]
+HOST_MODE=0 WITH_DIRS=()
+[ "$(visible_projects "$tmp/work" | wc -l)" = 2 ]
+[ "$(visible_projects "$tmp/work/app")" = "$(printf '%s\tsample' "$(readlink -f "$tmp/work/app")")" ]
+WITH_DIRS=("$(readlink -f "$tmp/work/nested/app2")")
+[ "$(visible_projects "$tmp/work/app" | wc -l)" = 2 ]
+WITH_DIRS=()
+HOST_MODE=1
+[ "$(visible_projects "$tmp/work/app" | wc -l)" = 2 ]
+[ "$(session_path /a/b)" = /host/a/b ]
+HOST_MODE=0
+[ "$(session_path /a/b)" = /a/b ]
+
+# Sessions get the projects tree read-only, and a multi-project launch gets
+# a table of contents instead of inlined handoffs.
+compose_run_args claude "$tmp/home_c" "$tmp/work"
+[[ " ${RUN_ARGS[*]} " == *"/projects:/home/satchel/projects:ro"* ]]
+write_memory_file claude "$tmp/home_c" "" "$tmp/work" 2>/dev/null
+grep -q 'Tracked projects in this session' "$tmp/home_c/.claude/CLAUDE.md"
+grep -q 'sample2' "$tmp/home_c/.claude/CLAUDE.md"
+grep -q 'unreachable here' "$tmp/home_c/.claude/CLAUDE.md"
+# Exactly one visible project: adopted as the session's project, no TOC.
+write_memory_file claude "$tmp/home_c" "" "$tmp/work/nested" 2>/dev/null
+! grep -q 'Tracked projects in this session' "$tmp/home_c/.claude/CLAUDE.md"
+grep -q 'No handoff exists for this project yet' "$tmp/home_c/.claude/CLAUDE.md"
+
+# file_multi_handoffs: files each well-formed chunk under its scope, drops
+# unknown ids, reports how many it saved; no delimiters means zero.
+body=$'=== project: sample ===\n## Goal\nA\n=== project: intruder ===\n## Goal\nX\n=== machine ===\n## Goal\nB'
+[ "$(file_multi_handoffs '2026-03-01T00:00:00Z' 'sample sample2 ' "$body" 2>/dev/null)" = 2 ]
+grep -q 'project=sample ' "$SATCHEL_DIR/sync/projects/sample/handoffs/2026-03-01T00-00-00Z--testbox.md"
+grep -q '^## Goal' "$SATCHEL_DIR/sync/machines/testbox/handoffs/2026-03-01T00-00-00Z.md"
+[ ! -d "$SATCHEL_DIR/sync/projects/intruder" ]
+[ "$(file_multi_handoffs '2026-03-02T00:00:00Z' 'sample ' $'## Goal\nplain' 2>/dev/null)" = 0 ]
+
 printf 'ok: project enrollment and machine path decisions\n'

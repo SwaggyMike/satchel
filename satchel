@@ -312,6 +312,27 @@ path_decision() { # exact path only: tracked | rejected | empty
   jq -r --arg p "$(readlink -f "$1")" '.paths[$p].status // empty' "$f"
 }
 
+# Attribution rule: work belongs to whichever tracked project's directory it
+# happened in, regardless of how the session was launched. These enumerate
+# the roster entries a session can actually reach - the launch dir and its
+# subtree, --with extras, or (Host Session) everything on the machine.
+visible_projects() { # visible_projects <launch-dir> → "path<TAB>id" per visible tracked project
+  local f roots=() path id r
+  f="$(machine_projects_file)"; [ -f "$f" ] || return 0
+  roots=("$(readlink -f "$1")" "${WITH_DIRS[@]}")
+  while IFS=$'\t' read -r path id; do
+    [ -n "$id" ] || continue
+    if [ "$HOST_MODE" -eq 1 ]; then printf '%s\t%s\n' "$path" "$id"; continue; fi
+    for r in "${roots[@]}"; do
+      case "$path" in "$r"|"$r"/*) printf '%s\t%s\n' "$path" "$id"; break ;; esac
+    done
+  done < <(jq -r '.paths | to_entries[] | select(.value.status == "tracked") | "\(.key)\t\(.value.project // empty)"' "$f")
+}
+
+session_path() { # real path → the path the agent sees for it in this session
+  if [ "$HOST_MODE" -eq 1 ]; then printf '/host%s' "$1"; else printf '%s' "$1"; fi
+}
+
 unique_project_id() {
   local wanted id n=2
   wanted="$(slugify "$1")"; [ -n "$wanted" ] || wanted=project
@@ -646,6 +667,12 @@ write_memory_file() { # write_memory_file <agent> <home> <slug> <project>
     codex)  target="$home/.codex/AGENTS.md" ;;
   esac
   mkdir -p "$(dirname "$target")"
+  # Path-based attribution: which tracked projects can this session reach?
+  local vis_paths=() vis_ids=() vp vi
+  while IFS=$'\t' read -r vp vi; do vis_paths+=("$vp"); vis_ids+=("$vi"); done < <(visible_projects "$project")
+  # A launch over exactly one tracked project reads like a session on that
+  # project: inline its handoff instead of pointing at a list of one.
+  if [ -z "$slug" ] && [ ${#vis_ids[@]} -eq 1 ]; then slug="${vis_ids[0]}"; fi
   handoff="$(latest_handoff "$slug")"
   [ -s "$SYNC_DIR/profile.md" ] && context="$(tail -n +2 "$SYNC_DIR/profile.md")"
   if [ -s "$SYNC_DIR/preferences.md" ]; then
@@ -718,11 +745,40 @@ so keep it short. Paths under /host apply only in Host Sessions. The
 end-of-session handoff is only for continuing the current work; anything
 durable belongs in the notes instead.
 EOF
+      if [ "$HOST_MODE" -eq 0 ]; then
+        cat <<'EOF'
+Notes may mention machine paths that are not mounted in this session; those
+are true facts about the machine, but the files are unreachable here - say
+they are outside the sandbox rather than claiming they do not exist.
+EOF
+      fi
     fi
     printf '\n'
     if [ -n "$context" ]; then
       printf '## Global context\n\n'
       printf '%s\n\n' "$context"
+    fi
+    # Table of contents, not inlined context: the agent reads the handoff of
+    # the project the user actually turns to, instead of starting every
+    # session with all of them in its head.
+    local vt=0 k
+    for k in "${!vis_ids[@]}"; do [ "${vis_ids[$k]}" != "$slug" ] && vt=$((vt + 1)); done
+    if [ "$vt" -gt 0 ]; then
+      printf '## Tracked projects in this session\n\n'
+      printf 'Work inside each of these directories belongs to that tracked project:\n\n'
+      for k in "${!vis_ids[@]}"; do
+        [ "${vis_ids[$k]}" = "$slug" ] && continue
+        printf -- '- %s: %s\n' "${vis_ids[$k]}" "$(session_path "${vis_paths[$k]}")"
+      done
+      cat <<'EOF'
+
+Each project's past handoffs are under ~/projects/<id>/handoffs/ (read-only;
+the file with the newest date in its first line is the latest). When the user
+turns to one of these projects, read its latest handoff first. At session end
+Satchel files a separate handoff for each project you worked in; work outside
+every tracked project is filed under this machine instead.
+EOF
+      printf '\n'
     fi
     if [ -n "$handoff" ]; then
       from="$(sed -n "1s/.*machine=\([^ ]*\).*date=\([^ ]*\).*/machine \1, \2/p" "$handoff")"
@@ -745,16 +801,65 @@ EOF
   return 0
 }
 
+file_handoff() { # file_handoff <project-id-or-empty> <date> <body> — empty id = machine scope
+  local id="$1" now="$2" body="$3" out
+  if [ -n "$id" ]; then out="$SYNC_DIR/projects/$id/handoffs/${now//:/-}--$MACHINE.md"
+  else out="$SYNC_DIR/machines/$MACHINE/handoffs/${now//:/-}.md"; fi
+  mkdir -p "$(dirname "$out")"
+  {
+    printf '%s project=%s machine=%s date=%s -->\n' "$HANDOFF_MARK" "${id:--}" "$MACHINE" "$now"
+    printf '%s\n' "$body"
+  } > "$out"
+  info "handoff saved: ${out#"$SYNC_DIR"/}"
+}
+
+file_multi_handoffs() { # file_multi_handoffs <date> <"id id ..."> <body> → prints count filed
+  # Splits an attribution-format body ('=== project: x ===' / '=== machine ===')
+  # and files each well-formed note under its scope. Unknown ids are dropped:
+  # the agent cannot invent projects, only file under ones on the roster.
+  local now="$1" valid=" $2 machine " body="$3" cur="" chunk="" saved=0 line
+  while IFS= read -r line; do
+    case "$line" in
+      '=== project: '*' ==='|'=== machine ==='|'=== end ===')
+        if [ -n "$cur" ] && printf '%s' "$chunk" | grep -q '^## Goal'; then
+          case "$valid" in
+            *" $cur "*)
+              if [ "$cur" = machine ]; then file_handoff "" "$now" "$chunk"
+              else file_handoff "$cur" "$now" "$chunk"; fi
+              saved=$((saved + 1)) ;;
+            *) warn "handoff for unknown scope '$cur' dropped" ;;
+          esac
+        fi
+        cur="${line#=== }"; cur="${cur% ===}"; cur="${cur#project: }"; chunk="" ;;
+      *) chunk+="$line"$'\n' ;;
+    esac
+  done <<< "$body"$'\n'"=== end ==="
+  printf '%s' "$saved"
+}
+
 generate_handoff() { # generate_handoff <agent> <slug> <project>  — runs after the session ends; empty slug = machine scope
   local agent="$1" slug="$2" project="$3"
-  local now out scope
+  local now scope prompt
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  if [ -n "$slug" ]; then
-    out="$SYNC_DIR/projects/$slug/handoffs/${now//:/-}--$MACHINE.md"; scope=project
-  else
-    out="$SYNC_DIR/machines/$MACHINE/handoffs/${now//:/-}.md"; scope=machine
+  # One visible project that is also the launch scope needs no attribution;
+  # anything more gets the multi-scope prompt so work files under each
+  # project it actually happened in, no matter how the session was launched.
+  local vis_paths=() vis_ids=() vp vi multi=0
+  while IFS=$'\t' read -r vp vi; do vis_paths+=("$vp"); vis_ids+=("$vi"); done < <(visible_projects "$project")
+  if [ ${#vis_ids[@]} -gt 1 ]; then multi=1
+  elif [ ${#vis_ids[@]} -eq 1 ] && [ "${vis_ids[0]}" != "$slug" ]; then multi=1
   fi
-  local prompt="The session is ending. Based on this conversation, write a handoff note so the next session on this $scope can continue where we left off. Use exactly these sections: ## Goal, ## Done, ## In flight, ## Next steps, ## Gotchas. Under 30 lines total. Output only the markdown, no preamble."
+  if [ "$multi" -eq 1 ]; then
+    local roster="" k
+    for k in "${!vis_ids[@]}"; do
+      roster+="- ${vis_ids[$k]}: $(session_path "${vis_paths[$k]}")"$'\n'
+    done
+    prompt="The session is ending. These tracked projects were visible in this session:
+${roster}Write a handoff note for each project you actually worked in during this conversation, so the next session on that project can continue where we left off. If you also did meaningful work outside every listed project, add one note for the machine itself. Start each note with a line of exactly '=== project: <id> ===' (or '=== machine ===' for the machine note), followed by the sections ## Goal, ## Done, ## In flight, ## Next steps, ## Gotchas. Under 30 lines per note. Skip anything you did not work in. Output only the markdown, no preamble."
+  else
+    scope=machine; [ -n "$slug" ] && scope=project
+    prompt="The session is ending. Based on this conversation, write a handoff note so the next session on this $scope can continue where we left off. Use exactly these sections: ## Goal, ## Done, ## In flight, ## Next steps, ## Gotchas. Under 30 lines total. Output only the markdown, no preamble."
+  fi
   # A handoff is a summary chore in a fixed format — the small fast model is
   # plenty and halves the wait at session end. Override per agent via
   # 'satchel settings'; empty means the agent's own default model.
@@ -824,12 +929,17 @@ generate_handoff() { # generate_handoff <agent> <slug> <project>  — runs after
     fi
   fi
   rm -f "$errf"
-  mkdir -p "$(dirname "$out")"
-  {
-    printf '%s project=%s machine=%s date=%s -->\n' "$HANDOFF_MARK" "${slug:--}" "$MACHINE" "$now"
-    printf '%s\n' "$body"
-  } > "$out"
-  info "handoff saved: ${out#"$SYNC_DIR"/}"
+  if [ "$multi" -eq 1 ]; then
+    local ids="" saved
+    for vi in "${vis_ids[@]}"; do ids+="$vi "; done
+    saved="$(file_multi_handoffs "$now" "$ids" "$body")"
+    # No delimiters parsed: keep the content anyway, filed under the launch
+    # scope exactly like a classic single-scope session.
+    [ "$saved" -eq 0 ] && file_handoff "$slug" "$now" "$body"
+  else
+    file_handoff "$slug" "$now" "$body"
+  fi
+  return 0
 }
 
 # ----------------------------------------------------------------- sync
@@ -931,6 +1041,12 @@ compose_run_args() { # compose_run_args <agent> <home> <project>
   if sync_ready; then
     mkdir -p "$SYNC_DIR/machines/$MACHINE"
     RUN_ARGS+=(-v "$SYNC_DIR/machines/$MACHINE:/home/satchel/machine")
+    # Project handoffs, read-only: a session that can see several tracked
+    # projects reads the relevant one's handoff on demand instead of having
+    # every project's context stuffed into its preamble. Writes stay
+    # satchel's job at session end.
+    mkdir -p "$SYNC_DIR/projects"
+    RUN_ARGS+=(-v "$SYNC_DIR/projects:/home/satchel/projects:ro")
   fi
   if [ "$agent" = claude ] && sync_ready; then
     mkdir -p "$SYNC_DIR/skills/shared" "$home/.claude"
@@ -1093,6 +1209,11 @@ cmd_session() {
   else
     local scope="untracked directory, handoff will save under machine '$MACHINE'"
     [ -n "$slug" ] && scope="project '$slug'"
+    local nvis
+    nvis="$(visible_projects "$project" | wc -l)"
+    if [ -z "$slug" ] && [ "$nvis" -gt 0 ]; then
+      scope="$nvis tracked project(s) under this directory, work files under each one touched"
+    fi
     if [ ${#WITH_DIRS[@]} -gt 0 ]; then
       info "sandboxed session - $scope, with ${#WITH_DIRS[@]} extra dir(s) mounted (--with)"
     elif [ -n "$slug" ]; then
