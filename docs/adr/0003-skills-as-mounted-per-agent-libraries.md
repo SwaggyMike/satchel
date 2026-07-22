@@ -1,5 +1,7 @@
 # Skills sync as per-agent libraries mounted from the Sync Repo
 
+> **Superseded by [ADR 0004](0004-one-shared-skill-library.md)** for the library layout — Codex gained a native skills system, and the per-agent split caused installs to silently reach no agent. The library is now one shared tree. The plugins-stay-per-host decision below still stands.
+
 Skills get the MCP Registry's promise — set up once, every host has it — with one deliberate narrowing: per agent, not across agents. The Sync Repo carries a `skills/` folder with one subfolder per agent (`skills/claude/`, `skills/codex/`), and satchel mounts the agent's subfolder into each session *as* that agent's skills directory. There is no install command and no detection: installing a skill means a folder appearing there (usually by asking the agent mid-session), uninstalling means deleting it, and `sync` carries the change fleet-wide. In v1 only Claude Code is wired up, natively at `~/.claude/skills/`; Codex has no native skills system, so its materializer is deferred until a first real skill is wanted there.
 
 ## Considered Options

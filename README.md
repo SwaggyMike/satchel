@@ -88,8 +88,8 @@ judgment.)
 ## What syncs, what doesn't
 
 Handoffs, MCP registry + tokens (private repo, your SSH keys — see
-[ADR 0002](docs/adr/0002-mcp-tokens-in-sync-repo.md)), and the per-agent
-skill library ([ADR 0003](docs/adr/0003-skills-as-mounted-per-agent-libraries.md))
+[ADR 0002](docs/adr/0002-mcp-tokens-in-sync-repo.md)), and the shared
+skill library ([ADR 0004](docs/adr/0004-one-shared-skill-library.md))
 sync. Agent logins and transcripts never do.
 
 Vocabulary lives in [CONTEXT.md](CONTEXT.md); decisions in [docs/adr/](docs/adr/).

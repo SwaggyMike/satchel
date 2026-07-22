@@ -146,7 +146,7 @@ git_sync() { git -C "$SYNC_DIR" "$@"; }
 # first push (-u) creates it.
 has_upstream() { git_sync rev-parse --abbrev-ref '@{u}' >/dev/null 2>&1; }
 
-# Crate owns the Sync Repo's commits, so they must work on a machine where
+# Satchel owns the Sync Repo's commits, so they must work on a machine where
 # git was never configured: give the clone a repo-local identity named after
 # the machine. A user's global identity, if present, wins.
 ensure_sync_identity() {
@@ -586,8 +586,8 @@ compose_run_args() { # compose_run_args <agent> <home> <project>
   RUN_ARGS=(--init -e HOME=/home/satchel -e "TERM=${TERM:-xterm-256color}" -e DISABLE_AUTOUPDATER=1)
   RUN_ARGS+=(-v "$home:/home/satchel")
   if [ "$agent" = claude ] && sync_ready; then
-    mkdir -p "$SYNC_DIR/skills/claude" "$home/.claude"
-    RUN_ARGS+=(-v "$SYNC_DIR/skills/claude:/home/satchel/.claude/skills")
+    mkdir -p "$SYNC_DIR/skills/shared" "$home/.claude"
+    RUN_ARGS+=(-v "$SYNC_DIR/skills/shared:/home/satchel/.claude/skills")
   fi
   if [ "$agent" = codex ]; then
     # Codex's config names an env var per MCP bearer token (materialize_mcp);
@@ -597,6 +597,10 @@ compose_run_args() { # compose_run_args <agent> <home> <project>
       t="$(token_for "$n")"
       if [ -n "$t" ]; then RUN_ARGS+=(-e "$(mcp_env_name "$n")=$t"); fi
     done < <(mcp_names)
+    if sync_ready; then
+      mkdir -p "$SYNC_DIR/skills/shared" "$home/.codex"
+      RUN_ARGS+=(-v "$SYNC_DIR/skills/shared:/home/satchel/.codex/skills")
+    fi
   fi
   RUN_ARGS+=(-v "$project:$project" -w "$project")
   if [ "$HOST_MODE" -eq 1 ]; then
@@ -641,7 +645,7 @@ session_mount_guard() {
 
 cmd_session() {
   local agent="$1"; shift
-  # Crate's own flags also work after the agent name, so the shims feel like
+  # Satchel's own flags also work after the agent name, so the shims feel like
   # the real CLIs: 'claude --host' == 'satchel --host claude'. Neither agent
   # has flags by these names, so plucking them out is unambiguous.
   local a args=()
@@ -722,7 +726,7 @@ cmd_session() {
 
 # ------------------------------------------------------------------- init
 
-# Crate generates and shows this machine's SSH key; pasting it into the git
+# Satchel generates and shows this machine's SSH key; pasting it into the git
 # host stays manual — satchel never talks to a git host's API.
 have_pubkey() { compgen -G "$HOME/.ssh/*.pub" >/dev/null; }
 
@@ -816,9 +820,9 @@ cmd_init() {
     done
   fi
   if [ -n "$url" ]; then
-    mkdir -p "$SYNC_DIR/machines/$name/handoffs" "$SYNC_DIR/skills/claude" "$SYNC_DIR/skills/codex"
+    mkdir -p "$SYNC_DIR/machines/$name/handoffs" "$SYNC_DIR/skills/shared"
     touch "$SYNC_DIR/machines/$name/handoffs/.gitkeep" \
-          "$SYNC_DIR/skills/claude/.gitkeep" "$SYNC_DIR/skills/codex/.gitkeep"
+          "$SYNC_DIR/skills/shared/.gitkeep"
     [ -f "$SYNC_TOKENS_FILE" ] && chmod 600 "$SYNC_TOKENS_FILE"
     ensure_sync_identity
     git_sync add -A
@@ -1028,14 +1032,11 @@ cmd_status() {
     local names; names="$(mcp_names | paste -sd, - | sed 's/,/, /g')"
     printf '\n%sMCP servers:%s %s\n' "$OUT_BOLD$OUT_BLUE" "$OUT_RESET" "${names:-(none)}"
     out_section 'Skills:'
-    local a s list
-    for a in claude codex; do
-      list=""
-      for s in "$SYNC_DIR/skills/$a"/*/; do
-        [ -d "$s" ] && list="$list$(basename "$s"), "
-      done
-      printf '  %s: %s\n' "$a" "${list:-(none), }" | sed 's/, $//'
+    local s list=""
+    for s in "$SYNC_DIR/skills/shared"/*/; do
+      [ -d "$s" ] && list="$list$(basename "$s"), "
     done
+    printf '  %s\n' "${list:-(none), }" | sed 's/, $//'
   fi
 
   # Plugins are per-host by design (ADR 0003) — say what lives only here.
@@ -1290,10 +1291,9 @@ host containers (Unraid repair helper)
   satchel update               self-update from git main + rebuild the image
   satchel version
 
-Skills: drop a folder into <sync>/skills/claude/ (or ask the agent to install
-one mid-session) and every machine's Claude sessions have it after a sync.
-skills/codex/ syncs too, but codex has no native skills system yet — those
-folders wait until satchel grows a codex materializer (docs/adr/0003).
+Skills: drop a folder into <sync>/skills/shared/ (or ask the agent to install
+one mid-session) and every machine's Claude and Codex sessions have it after
+a sync. Skills are shared across both agents — there is one skills tree.
 EOF
 }
 
