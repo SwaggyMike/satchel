@@ -22,7 +22,6 @@ SATCHEL_DIR="${SATCHEL_DIR:-$HOME/.satchel}"
 CONFIG_FILE="$SATCHEL_DIR/config"
 SYNC_DIR="$SATCHEL_DIR/sync"
 HOMES_DIR="$SATCHEL_DIR/home"
-SNAP_DIR="$SATCHEL_DIR/snapshots"
 LOCAL_TOKENS_FILE="$SATCHEL_DIR/mcp-tokens.local.env"
 SCRIPT_SHA_FILE="$SATCHEL_DIR/script-sha"
 IMAGE="localhost/satchel:latest"
@@ -1159,53 +1158,6 @@ cmd_doctor() {
   fi
 }
 
-# ------------------------------------------- container snapshot / drift
-
-# The subset of container config worth tracking: what a management UI
-# (Unraid) would regenerate. Runtime noise (timestamps, IDs) is excluded
-# so the diff only shows real drift.
-SNAP_FILTER='.[0] | {
-  Image: .Config.Image,
-  Env: (.Config.Env | sort),
-  Cmd: .Config.Cmd,
-  Entrypoint: .Config.Entrypoint,
-  Binds: ((.HostConfig.Binds // []) | sort),
-  Ports: .HostConfig.PortBindings,
-  RestartPolicy: .HostConfig.RestartPolicy.Name,
-  Network: .HostConfig.NetworkMode,
-  ExtraHosts: .HostConfig.ExtraHosts,
-  Devices: .HostConfig.Devices,
-  Privileged: .HostConfig.Privileged
-}'
-
-cmd_snapshot() {
-  local name="${1:-}"; [ -n "$name" ] || die "usage: satchel snapshot <container>"
-  need_cmd jq
-  mkdir -p "$SNAP_DIR"
-  "$(engine)" inspect "$name" | jq "$SNAP_FILTER" > "$SNAP_DIR/$name.json" \
-    || die "could not inspect container '$name'"
-  info "snapshot saved: $SNAP_DIR/$name.json"
-}
-
-cmd_drift() {
-  local name="${1:-}"; [ -n "$name" ] || die "usage: satchel drift <container>"
-  need_cmd jq
-  local snap="$SNAP_DIR/$name.json"
-  [ -f "$snap" ] || die "no snapshot for '$name' — run 'satchel snapshot $name' first"
-  local live; live="$(mktemp)"
-  "$(engine)" inspect "$name" | jq "$SNAP_FILTER" > "$live" || die "could not inspect container '$name'"
-  if diff -u --label "snapshot" --label "live" "$snap" "$live"; then
-    info "no drift — '$name' matches its snapshot"
-  else
-    printf '\n'
-    if confirm "container '$name' has drifted. restart it?"; then
-      "$(engine)" restart "$name"
-      info "restarted '$name'"
-    fi
-  fi
-  rm -f "$live"
-}
-
 # ----------------------------------------------------------------- update
 
 # What this update brings: the commits between the recorded installed commit
@@ -1306,10 +1258,6 @@ setup
   satchel settings             show every setting; 'satchel settings <KEY> <value>'
                              sets it fleet-wide (--local: this machine only)
 
-host containers (Unraid repair helper)
-  satchel snapshot <name>      save a container's config to compare against later
-  satchel drift <name>         diff live config vs snapshot, offer a restart
-
   satchel update               self-update from git main + rebuild the image
   satchel version
 
@@ -1343,8 +1291,6 @@ main() {
     doctor)            cmd_doctor "$@" ;;
     mcp)               cmd_mcp "$@" ;;
     import)            cmd_import "$@" ;;
-    snapshot)          cmd_snapshot "$@" ;;
-    drift)             cmd_drift "$@" ;;
     update)            cmd_update "$@" ;;
     version|--version) out_header "satchel $SATCHEL_VERSION" ;;
     help|--help|-h)    cmd_help ;;

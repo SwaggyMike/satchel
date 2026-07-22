@@ -84,7 +84,6 @@ judgment.)
 | `satchel mcp add\|list\|remove` | manage the MCP Registry (configured once, wired into every session) |
 | `satchel settings` | show every setting and its value; `satchel settings <KEY> <value>` sets it fleet-wide, `--local` for one machine |
 | `satchel doctor` | check this machine's setup end to end — engine, image, key, sync, MCP endpoints |
-| `satchel snapshot <name>` / `satchel drift <name>` | snapshot a host container's config, later diff and restart — for UIs that regenerate containers |
 | `satchel update` | self-update from `main` (lists the commits it pulls in) and rebuild the agent image |
 
 ## What syncs, what doesn't
