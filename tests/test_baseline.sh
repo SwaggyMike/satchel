@@ -25,6 +25,14 @@ touch "$tmp/claude/.claude/.credentials.json" "$tmp/codex/.codex/auth.json"
 baseline_authenticated claude "$tmp/claude"
 baseline_authenticated codex "$tmp/codex"
 
+# Baseline refreshes launched by `satchel init` must perform the same agent-
+# home ownership repair as ordinary sessions before Codex reads config.toml.
+repaired=()
+fix_home_ownership() { repaired+=("$1"); }
+prepare_baseline_home "$tmp/codex"
+[ "${repaired[0]}" = "$tmp/codex" ]
+[ "${repaired[1]}" = "$SATCHEL_DIR/sync/machines/testbox" ]
+
 compose_baseline_run_args claude "$tmp/claude"
 [[ " ${RUN_ARGS[*]} " == *" /:/host:ro "* ]]
 [[ " ${RUN_ARGS[*]} " == *"/machines/testbox:/home/satchel/machine"* ]]

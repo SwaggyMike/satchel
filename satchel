@@ -89,12 +89,18 @@ confirm_yes() { # default yes (for asks almost everyone wants)
 
 choose_baseline() { # yes | later | never; baseline access is privileged enough to default later
   local reply
-  read -r -p "$(prompt_text "this machine has no baseline notes; inspect it read-only now? [y]es/[N]ot now/[d]on't ask again: ")" reply
+  explain_machine_baseline build
+  read -r -p "$(prompt_text "start the guided machine inspection now? [y]es/[N]ot now/[d]on't ask again: ")" reply
   case "$reply" in
     [yY]*) printf 'yes' ;;
     [dD]*) printf 'never' ;;
     *)     printf 'later' ;;
   esac
+}
+
+explain_machine_baseline() { # explain_machine_baseline <build|refresh>
+  info "machine baseline: an authenticated agent will $1 concise notes about this machine's OS, hardware, storage, network, services, containers, and operational quirks"
+  info "the host is mounted read-only at /host; the agent shows you its proposed notes before saving approved content to your private Sync Repo"
 }
 
 need_cmd() {
@@ -1089,8 +1095,18 @@ compose_baseline_run_args() { # compose_baseline_run_args <agent> <home>
   if podman_rootless; then RUN_ARGS+=(--userns=keep-id); fi
 }
 
+prepare_baseline_home() { # repair files a previous root Host Session may have left behind
+  mkdir -p "$1"
+  fix_home_ownership "$1"
+  # Satchel itself may run as root on Unraid while safe sessions run as uid
+  # 1000. Keep the one synced directory this session may edit writable too.
+  mkdir -p "$SYNC_DIR/machines/$MACHINE"
+  fix_home_ownership "$SYNC_DIR/machines/$MACHINE"
+}
+
 run_machine_baseline() { # run_machine_baseline <agent> <home>
   local agent="$1" home="$2" notes before prompt rc=0
+  prepare_baseline_home "$home"
   notes="$(baseline_notes_file)"; mkdir -p "$(dirname "$notes")"
   before="$(mktemp)"; [ -f "$notes" ] && cp "$notes" "$before" || : > "$before"
   prompt="Satchel machine-baseline onboarding, version $BASELINE_VERSION. Inspect this machine conservatively and read-only. The real host filesystem is mounted at /host; the container's bare /etc, /var, and similar paths are disposable and are not the host. You cannot and must not change the host, install packages, restart services, or use control sockets.
@@ -1155,7 +1171,8 @@ offer_baseline_refresh() {
   baseline_authenticated codex "$HOMES_DIR/codex" && co=1
   [ "$ca" -eq 1 ] || [ "$co" -eq 1 ] || return 0
   [ -n "$(baseline_marker_version)" ] && action="refresh"
-  confirm "$action the curated machine baseline now (host filesystem is read-only)?" || return 0
+  explain_machine_baseline "$action"
+  confirm "start the guided machine inspection now?" || return 0
   if [ "$ca" -eq 1 ] && [ "$co" -eq 1 ]; then
     local reply
     read -r -p "$(prompt_text "agent [claude/codex] [claude]: ")" reply
