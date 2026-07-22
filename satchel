@@ -887,13 +887,17 @@ compose_run_args() { # compose_run_args <agent> <home> <project>
 # user, so there is never anything to heal there.
 fix_home_ownership() { # fix_home_ownership <home>
   podman_rootless && return 0
-  [ -n "$(find "$1" ! -user "$SATCHEL_UID" -print -quit 2>/dev/null)" ] || return 0
-  info "reclaiming files a Host Session left owned by root"
+  local count
+  count="$(find "$1" ! -user "$SATCHEL_UID" -printf . 2>/dev/null | wc -c)"
+  [ "$count" -gt 0 ] || return 0
   local label=()
   if selinux_active; then label=(--security-opt label=disable); fi
-  "$(engine)" run --rm --user 0:0 "${label[@]}" -v "$1:/reclaim" "$IMAGE" \
-    chown -R "$SATCHEL_UID:$SATCHEL_GID" /reclaim \
-    || warn "could not reclaim $1 — sessions may hit permission errors"
+  if "$(engine)" run --rm --user 0:0 "${label[@]}" -v "$1:/reclaim" "$IMAGE" \
+      chown -R "$SATCHEL_UID:$SATCHEL_GID" /reclaim; then
+    info "restored ownership of $count items in $1 to $SATCHEL_UID:$SATCHEL_GID"
+  else
+    warn "could not restore ownership in $1 — sessions may hit permission errors"
+  fi
 }
 
 # The sandbox promise is "the container sees only the project directory" —
@@ -1000,8 +1004,6 @@ cmd_session() {
         fi
       fi
       [ -n "$slug" ] && generate_handoff "$agent" "$slug" "$project"
-    else
-      info "no conversation this session — handoff untouched"
     fi
     # Push regardless of the handoff: a session may have installed skills or
     # edited synced files even without a handoff to write.
