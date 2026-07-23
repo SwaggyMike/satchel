@@ -35,7 +35,9 @@ HOST_MODE=0
 UNSAFE_HOME=0
 WITH_DIRS=()
 ENGINE=""
-BASELINE_VERSION=1
+BASELINE_VERSION=2
+MACHINE_NOTES_WORD_LIMIT=750
+HANDOFF_RETENTION=10
 SYNC_BLOCK_REASON=""
 
 # ---------------------------------------------------------------- helpers
@@ -100,7 +102,7 @@ choose_baseline() { # yes | later | never; baseline access is privileged enough 
 
 explain_machine_baseline() {
   info "machine baseline: an authenticated agent will inspect this system's specs, OS, hardware, storage, network, services, containers, and operational quirks"
-  info "the host is mounted read-only at /host; the agent shows you its proposed notes before saving approved content to your private Sync Repo"
+  info "the host is mounted read-only at /host; the agent shows you a proposed inventory and concise operational notes before saving approved content to your private Sync Repo"
 }
 
 need_cmd() {
@@ -772,14 +774,44 @@ EOF
         printf '\n'
       fi
       cat <<EOF
-Durable facts and procedures for this machine live in /home/satchel/machine/notes.md,
-shared with every session on $MACHINE. When you identify the right way to do
-a machine-specific task, record it there; when an entry turns out wrong or
-obsolete, fix or delete it - the file is curated current truth, not a log,
-so keep it short. Paths under /host apply only in Host Sessions. The
-end-of-session handoff is only for continuing the current work; anything
-durable belongs in the notes instead.
+Machine knowledge shared with every session on $MACHINE lives under
+/home/satchel/machine/. Keep /home/satchel/machine/notes.md as concise,
+current operational context,
+not history: save a fact there only when it remains true after the current
+task, is machine-specific or unusually important, and would prevent meaningful
+wasted work, mistakes, or harm later. Organize by topic and merge existing
+entries instead of appending incidents. Remove resolved or obsolete material.
+Keep machine-wide unresolved risks in notes; ordinary unfinished work belongs
+in the handoff. The soft limit for notes.md is $MACHINE_NOTES_WORD_LIMIT words;
+consolidate or move detail before exceeding it.
+
+Detailed, repeatable machine procedures belong in guides/<topic>.md, one
+current guide per topic. Project behavior belongs in that project's docs.
+Resolved one-time fixes belong nowhere. When the user says to save or remember
+something, preserve the useful substance concisely in the appropriate place;
+only preserve exact wording when they explicitly ask for it. You may save a
+clearly qualifying fact without being asked, but default to saving nothing
+when uncertain. Mention any machine-knowledge changes in your final response.
+Paths under /host apply only in Host Sessions.
 EOF
+      local inventory="$SYNC_DIR/machines/$MACHINE/inventory.md" generated="" guide title
+      if [ -s "$inventory" ]; then
+        generated="$(baseline_generated_at)"
+        printf '\nThe dated machine inventory is available on demand at /home/satchel/machine/inventory.md%s. Read it when hardware, services, storage, or other system details matter; do not treat point-in-time observations as current without rechecking.\n' "${generated:+ (generated $generated)}"
+      fi
+      if compgen -G "$SYNC_DIR/machines/$MACHINE/guides/*.md" >/dev/null; then
+        printf '\nAvailable on-demand machine guides:\n\n'
+        for guide in "$SYNC_DIR/machines/$MACHINE"/guides/*.md; do
+          title="$(sed -n 's/^# //p' "$guide" | head -n 1)"
+          printf -- '- /home/satchel/machine/guides/%s%s\n' "$(basename "$guide")" "${title:+ — $title}"
+        done
+      fi
+      local note_words=0
+      [ -f "$SYNC_DIR/machines/$MACHINE/notes.md" ] \
+        && note_words="$(wc -w < "$SYNC_DIR/machines/$MACHINE/notes.md")"
+      if [ "$note_words" -gt "$MACHINE_NOTES_WORD_LIMIT" ]; then
+        printf '\nThe machine notes are currently %s words, over the %s-word soft limit. Consolidate or move detail into guides before adding more.\n' "$note_words" "$MACHINE_NOTES_WORD_LIMIT"
+      fi
       if [ "$HOST_MODE" -eq 0 ]; then
         cat <<'EOF'
 Notes may mention machine paths that are not mounted in this session; those
@@ -807,7 +839,7 @@ EOF
       done
       cat <<'EOF'
 
-Each project's past handoffs are under /home/satchel/projects/<id>/handoffs/ (read-only;
+Each project's retained handoffs are under /home/satchel/projects/<id>/handoffs/ (read-only;
 the file with the newest date in its first line is the latest). When the user
 turns to one of these projects, read its latest handoff first. At session end
 Satchel files a separate handoff for each project you worked in; work outside
@@ -832,12 +864,42 @@ EOF
       fi
     fi
   } > "$target"
-  [ -n "$handoff" ] && info "handoff loaded ($from)"
   return 0
 }
 
+prune_handoffs() { # prune_handoffs <handoff-dir> → prints count removed
+  local dir="$1" kept=0 removed=0 f date
+  [ -d "$dir" ] || { printf '0'; return 0; }
+  while IFS=$'\t' read -r date f; do
+    [ -n "$f" ] || continue
+    kept=$((kept + 1))
+    if [ "$kept" -gt "$HANDOFF_RETENTION" ]; then
+      rm -f -- "$f"
+      removed=$((removed + 1))
+    fi
+  done < <(
+    for f in "$dir"/*.md; do
+      [ -f "$f" ] || continue
+      date="$(sed -n '1s/.*date=\([^ ]*\).*/\1/p' "$f")"
+      printf '%s\t%s\n' "$date" "$f"
+    done | sort -r
+  )
+  printf '%s' "$removed"
+}
+
+prune_all_handoffs() {
+  sync_ready || return 0
+  local dir removed total=0
+  for dir in "$SYNC_DIR"/projects/*/handoffs "$SYNC_DIR"/machines/*/handoffs; do
+    [ -d "$dir" ] || continue
+    removed="$(prune_handoffs "$dir")"
+    total=$((total + removed))
+  done
+  [ "$total" -eq 0 ] || info "pruned $total old handoff(s); keeping the latest $HANDOFF_RETENTION per project or machine"
+}
+
 file_handoff() { # file_handoff <project-id-or-empty> <date> <body> — empty id = machine scope
-  local id="$1" now="$2" body="$3" out
+  local id="$1" now="$2" body="$3" out pruned
   if [ -n "$id" ]; then out="$SYNC_DIR/projects/$id/handoffs/${now//:/-}--$MACHINE.md"
   else out="$SYNC_DIR/machines/$MACHINE/handoffs/${now//:/-}.md"; fi
   mkdir -p "$(dirname "$out")"
@@ -845,7 +907,9 @@ file_handoff() { # file_handoff <project-id-or-empty> <date> <body> — empty id
     printf '%s project=%s machine=%s date=%s -->\n' "$HANDOFF_MARK" "${id:--}" "$MACHINE" "$now"
     printf '%s\n' "$body"
   } > "$out"
+  pruned="$(prune_handoffs "$(dirname "$out")")"
   info "handoff saved: ${out#"$SYNC_DIR"/}"
+  [ "$pruned" -eq 0 ] || info "pruned $pruned older handoff(s); keeping the latest $HANDOFF_RETENTION"
 }
 
 file_multi_handoffs() { # file_multi_handoffs <date> <"id id ..."> <body> → prints count filed
@@ -1003,6 +1067,7 @@ sync_machine_registration() { # sync_machine_registration <machine-name>
 cmd_sync() {
   sync_ready || die "sync is not set up — run 'satchel init' first"
   ensure_sync_identity
+  prune_all_handoffs
   git_sync add -A
   if ! git_sync diff --cached --quiet; then
     git_sync commit -q -m "sync from $MACHINE"
@@ -1083,13 +1148,39 @@ update_check() {
 
 # ------------------------------------------------------ machine baseline
 
-baseline_notes_file() { printf '%s/machines/%s/notes.md' "$SYNC_DIR" "$MACHINE"; }
-baseline_skip_file()  { printf '%s/machines/%s/.baseline-skip' "$SYNC_DIR" "$MACHINE"; }
+machine_dir()             { printf '%s/machines/%s' "$SYNC_DIR" "$MACHINE"; }
+baseline_notes_file()     { printf '%s/notes.md' "$(machine_dir)"; }
+baseline_inventory_file() { printf '%s/inventory.md' "$(machine_dir)"; }
+baseline_skip_file()      { printf '%s/.baseline-skip' "$(machine_dir)"; }
+
+warn_machine_notes_size() {
+  local notes words
+  notes="$(baseline_notes_file)"
+  [ -f "$notes" ] || return 0
+  words="$(wc -w < "$notes")"
+  [ "$words" -le "$MACHINE_NOTES_WORD_LIMIT" ] || \
+    warn "machine notes are $words words (soft limit: $MACHINE_NOTES_WORD_LIMIT); consolidate or move detail into guides"
+}
 
 baseline_marker_version() {
-  local f; f="$(baseline_notes_file)"
-  [ -f "$f" ] || return 0
-  sed -n '1s/^<!-- satchel-machine-baseline version=\([0-9][0-9]*\) generated=[^ ]* -->$/\1/p' "$f"
+  local f
+  # Version 2 keeps the marker with the dated inventory it describes. Read
+  # the old notes location as a migration fallback so existing machines are
+  # reported as v1 instead of being mistaken for never-onboarded machines.
+  for f in "$(baseline_inventory_file)" "$(baseline_notes_file)"; do
+    [ -f "$f" ] || continue
+    sed -n '1s/^<!-- satchel-machine-baseline version=\([0-9][0-9]*\) generated=[^ ]* -->$/\1/p' "$f"
+    return 0
+  done
+}
+
+baseline_generated_at() {
+  local f
+  for f in "$(baseline_inventory_file)" "$(baseline_notes_file)"; do
+    [ -f "$f" ] || continue
+    sed -n '1s/^<!-- satchel-machine-baseline version=[0-9][0-9]* generated=\([^ ]*\) -->$/\1/p' "$f"
+    return 0
+  done
 }
 
 baseline_authenticated() { # baseline_authenticated <claude|codex> <agent-home>
@@ -1127,6 +1218,40 @@ baseline_secret_scan() { # baseline_secret_scan <old-file> <new-file>
   return 0
 }
 
+machine_knowledge_files() { # machine_knowledge_files <machine-dir> → relative paths
+  local dir="$1" f
+  [ -f "$dir/notes.md" ] && printf 'notes.md\n'
+  [ -f "$dir/inventory.md" ] && printf 'inventory.md\n'
+  if [ -d "$dir/guides" ]; then
+    while IFS= read -r f; do printf '%s\n' "${f#"$dir/"}"; done \
+      < <(find "$dir/guides" -type f -name '*.md' -print | sort)
+  fi
+}
+
+baseline_added_knowledge_lines() { # baseline_added_knowledge_lines <old-dir> <new-dir>
+  local old="$1" new="$2" rel
+  while IFS= read -r rel; do
+    if [ -f "$old/$rel" ]; then
+      baseline_added_lines "$old/$rel" "$new/$rel"
+    else
+      cat "$new/$rel"
+    fi
+  done < <({ machine_knowledge_files "$old"; machine_knowledge_files "$new"; } | sort -u)
+}
+
+baseline_secret_scan_tree() { # baseline_secret_scan_tree <old-dir> <new-dir>
+  local added
+  added="$(baseline_added_knowledge_lines "$1" "$2")"
+  [ -z "$added" ] && return 0
+  local old new
+  old="$(mktemp)"; new="$(mktemp)"
+  : > "$old"; printf '%s\n' "$added" > "$new"
+  local rc=0
+  baseline_secret_scan "$old" "$new" || rc=$?
+  rm -f "$old" "$new"
+  return "$rc"
+}
+
 compose_baseline_run_args() { # compose_baseline_run_args <agent> <home>
   local agent="$1" home="$2"
   RUN_ARGS=(--init -e HOME=/home/satchel -e "TERM=${TERM:-xterm-256color}" -e DISABLE_AUTOUPDATER=1)
@@ -1151,17 +1276,26 @@ prepare_baseline_home() { # repair files a previous root Host Session may have l
 }
 
 run_machine_baseline() { # run_machine_baseline <agent> <home>
-  local agent="$1" home="$2" notes before prompt rc=0
+  local agent="$1" home="$2" inventory machine before prompt rc=0
   prepare_baseline_home "$home"
-  notes="$(baseline_notes_file)"; mkdir -p "$(dirname "$notes")"
-  before="$(mktemp)"; [ -f "$notes" ] && cp "$notes" "$before" || : > "$before"
+  machine="$(machine_dir)"; inventory="$(baseline_inventory_file)"
+  mkdir -p "$machine"
+  before="$(mktemp -d)"; cp -a "$machine/." "$before/"
   prompt="Satchel machine-baseline onboarding, version $BASELINE_VERSION. Inspect this machine conservatively and read-only. The real host filesystem is mounted at /host; the container's bare /etc, /var, and similar paths are disposable and are not the host. You cannot and must not change the host, install packages, restart services, or use control sockets.
 
-Build concise, curated machine knowledge covering identity and OS, hardware, storage and filesystems, networking, configured services, containers and major workloads, administration/development tools, machine-specific procedures, and known constraints. Distinguish live observations from configuration inferred from files when it matters. Never record passwords, tokens, keys, cookies, complete environment dumps, credential-bearing URLs, or secret values. Do not paste raw command output.
+First inspect, then show the user the exact content of every file you propose changing. Do not write anything until the user approves it. After approval, organize the machine knowledge as follows:
 
-First inspect and then show the user the exact baseline you propose. Do not write anything until the user approves it. After approval, merge it with any correct existing notes at /home/satchel/machine/notes.md; update verified stale facts, but never blindly replace useful notes. Put this exact machine-readable marker on line 1, substituting the current UTC time for TIMESTAMP:
+1. Replace /home/satchel/machine/inventory.md with a dated reference inventory covering identity and OS, hardware, storage and filesystems, networking, configured services, containers and major workloads, and administration/development tools. Distinguish live observations from configuration inferred from files when it matters. Put this exact machine-readable marker on line 1, substituting the current UTC time for TIMESTAMP:
 <!-- satchel-machine-baseline version=$BASELINE_VERSION generated=TIMESTAMP -->
-Use an initial structure of Identity and OS, Hardware, Storage and filesystems, Network, Services, Containers and workloads, Development and administration tools, Machine-specific procedures, and Known constraints and quirks, omitting empty sections. The structure may evolve later."
+Use an initial structure of Identity and OS, Hardware, Storage and filesystems, Network, Services, Containers and workloads, and Development and administration tools, omitting empty sections.
+
+2. Merge only concise, enduring operational knowledge into /home/satchel/machine/notes.md. A note qualifies only when it remains true after this task, is machine-specific or unusually important, and would prevent meaningful wasted work, mistakes, or harm in a future session. Organize by topic; describe current truth or a future condition, never the incident that revealed it. Merge or replace existing entries instead of appending a history. Keep machine-wide unresolved risks here until resolved. The file has a soft ceiling of $MACHINE_NOTES_WORD_LIMIT words: consolidate before exceeding it, but never discard essential information merely to hit the number.
+
+3. If a qualifying reusable procedure needs substantial detail, put it in /home/satchel/machine/guides/<topic>.md and leave only a short pointer or warning in notes.md. Maintain one current guide per topic, updated in place; never create dated incident guides. Do not create a guide for an ordinary or resolved one-time fix.
+
+Unfinished task state belongs in handoffs, project behavior belongs in that project's own documentation, and resolved one-time incidents belong nowhere. Preserve correct existing notes and guides, update verified stale facts, and delete obsolete or incident-only material during a refresh. Do not modify projects.json or handoffs.
+
+Never record passwords, tokens, keys, cookies, complete environment dumps, credential-bearing URLs, or secret values. Do not paste raw command output."
   compose_baseline_run_args "$agent" "$home"
   local tty=() launch
   [ -t 0 ] && tty=(-it)
@@ -1169,25 +1303,26 @@ Use an initial structure of Identity and OS, Hardware, Storage and filesystems, 
     claude) launch=(claude "$prompt") ;;
     codex)  launch=(codex -c 'sandbox_mode="danger-full-access"' -c check_for_update_on_startup=false "$prompt") ;;
   esac
-  warn "BASELINE INSPECTION - the real machine is visible at /host read-only; only synced machine notes are writable"
+  warn "BASELINE INSPECTION - the real machine is visible at /host read-only; only the synced machine-knowledge directory is writable"
   "$(engine)" run --rm "${tty[@]}" "${RUN_ARGS[@]}" "$IMAGE" "${launch[@]}" || rc=$?
 
-  if [ ! -f "$notes" ] || cmp -s "$before" "$notes" 2>/dev/null; then
+  if [ ! -f "$inventory" ] || { [ -f "$before/inventory.md" ] && cmp -s "$before/inventory.md" "$inventory" 2>/dev/null; }; then
     warn "machine baseline was not written; onboarding remains incomplete"
     [ "$rc" -eq 0 ] || warn "baseline agent exited with status $rc; continuing to the requested session"
-    rm -f "$before"; return 0
+    rm -rf "$before"; return 0
   fi
   if [ "$(baseline_marker_version)" != "$BASELINE_VERSION" ]; then
-    SYNC_BLOCK_REASON="machine notes changed without a valid baseline marker"
-    warn "$SYNC_BLOCK_REASON; automatic sync is disabled until the notes are reviewed"
-    rm -f "$before"; return 0
+    SYNC_BLOCK_REASON="machine inventory changed without a valid baseline marker"
+    warn "$SYNC_BLOCK_REASON; automatic sync is disabled until the machine knowledge is reviewed"
+    rm -rf "$before"; return 0
   fi
-  if ! baseline_secret_scan "$before" "$notes"; then
-    SYNC_BLOCK_REASON="the baseline notes contain a possible secret in newly-added content"
+  if ! baseline_secret_scan_tree "$before" "$machine"; then
+    SYNC_BLOCK_REASON="the baseline machine knowledge contains a possible secret in newly-added content"
     warn "$SYNC_BLOCK_REASON; no suspected value was printed and automatic sync is disabled"
-    rm -f "$before"; return 0
+    rm -rf "$before"; return 0
   fi
-  rm -f "$before"
+  rm -rf "$before"
+  warn_machine_notes_size
   quiet_push "machine baseline v$BASELINE_VERSION on $MACHINE"
   success "machine baseline saved to the private Sync Repo"
   return 0
@@ -1235,6 +1370,14 @@ offer_baseline_refresh() {
 # --------------------------------------------------------------- sessions
 
 RUN_ARGS=()
+
+announce_session_mode() {
+  # Normal sandboxing is the expected success path. Agent TUIs immediately
+  # replace the terminal screen, so a routine pre-launch banner only flashes.
+  # Host mode is materially dangerous and remains an explicit warning.
+  [ "$HOST_MODE" -eq 1 ] || return 0
+  warn "HOST SESSION - no sandbox, you are root. The machine's real files are under /host; bare paths like /etc are the container's throwaway copies"
+}
 
 # Pasting an image (Ctrl+V) means reading the host clipboard from inside the
 # container: claude shells out to wl-paste/xclip (baked into the image),
@@ -1418,6 +1561,7 @@ cmd_session() {
     warn "sync is not set up (run 'satchel init') — session is sandboxed but nothing will sync"
   fi
   quiet_pull
+  prune_all_handoffs
   update_check
   slug="$(project_for_path "$project")"
 
@@ -1442,26 +1586,7 @@ cmd_session() {
 
   compose_run_args "$agent" "$home" "$project"
   local tty=() ; [ -t 0 ] && tty=(-it)
-  # One banner per launch: scope (project / untracked-to-machine) and mode
-  # (sandboxed / host) are the two facts the human otherwise has to infer.
-  if [ "$HOST_MODE" -eq 1 ]; then
-    warn "HOST SESSION - no sandbox, you are root. The machine's real files are under /host; bare paths like /etc are the container's throwaway copies"
-  else
-    local scope="untracked directory, handoff will save under machine '$MACHINE'"
-    [ -n "$slug" ] && scope="project '$slug'"
-    local nvis
-    nvis="$(visible_projects "$project" | wc -l)"
-    if [ -z "$slug" ] && [ "$nvis" -gt 0 ]; then
-      scope="$nvis tracked project(s) under this directory, work files under each one touched"
-    fi
-    if [ ${#WITH_DIRS[@]} -gt 0 ]; then
-      info "sandboxed session - $scope, with ${#WITH_DIRS[@]} extra dir(s) mounted (--with)"
-    elif [ -n "$slug" ]; then
-      info "sandboxed session - $scope, only this directory is mounted"
-    else
-      info "sandboxed session - $scope"
-    fi
-  fi
+  announce_session_mode
 
   # A handoff is only worth writing if a conversation actually happened —
   # detected as new transcript files in the agent home during the session.
@@ -1514,6 +1639,7 @@ cmd_session() {
     # Push regardless of the handoff: a session may have installed skills or
     # edited synced files even without a handoff to write.
     if [ -z "$SYNC_BLOCK_REASON" ]; then
+      warn_machine_notes_size
       quiet_push "session: ${slug:-untracked} on $MACHINE"
     else
       warn "automatic sync skipped: $SYNC_BLOCK_REASON; review machine notes, then run 'satchel sync'"

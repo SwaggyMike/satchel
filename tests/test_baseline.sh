@@ -24,8 +24,14 @@ ENGINE=docker
 
 notes="$(baseline_notes_file)"
 [ -z "$(baseline_marker_version)" ]
+# Version 1 stored the marker in notes.md; keep recognizing it during the
+# one-time migration to the split inventory/notes layout.
 printf '<!-- satchel-machine-baseline version=1 generated=2026-07-22T00:00:00Z -->\n# Machine baseline\n' > "$notes"
 [ "$(baseline_marker_version)" = 1 ]
+inventory="$(baseline_inventory_file)"
+printf '<!-- satchel-machine-baseline version=2 generated=2026-07-23T00:00:00Z -->\n# Inventory\n' > "$inventory"
+[ "$(baseline_marker_version)" = 2 ]
+[ "$(baseline_generated_at)" = 2026-07-23T00:00:00Z ]
 
 mkdir -p "$tmp/claude/.claude" "$tmp/codex/.codex"
 ! baseline_authenticated claude "$tmp/claude"
@@ -74,5 +80,17 @@ printf '# Notes\n- hostname: testbox\n- api_token = abcdefghijklmnopqrstuvwxyz01
 ! baseline_secret_scan "$old" "$new"
 printf '# Notes\n- hostname: testbox\n- https://admin:correct-horse-battery-staple@example.test\n' > "$new"
 ! baseline_secret_scan "$old" "$new"
+
+# Baseline approval can now write inventory, notes, and guides; newly-added
+# content in every knowledge tier gets the same secret scan.
+old_tree="$tmp/old-tree" new_tree="$tmp/new-tree"
+mkdir -p "$old_tree/guides" "$new_tree/guides"
+printf '# Notes\n- use Podman\n' > "$old_tree/notes.md"
+cp "$old_tree/notes.md" "$new_tree/notes.md"
+printf '<!-- satchel-machine-baseline version=2 generated=2026-07-23T00:00:00Z -->\n# Inventory\n' > "$new_tree/inventory.md"
+printf '# Time Machine\n- Verify the Avahi service after reboot.\n' > "$new_tree/guides/time-machine.md"
+baseline_secret_scan_tree "$old_tree" "$new_tree"
+printf '# Time Machine\n- password = definitely-not-safe\n' > "$new_tree/guides/time-machine.md"
+! baseline_secret_scan_tree "$old_tree" "$new_tree"
 
 printf 'ok: machine baseline state, mounts, auth, and secret scan\n'

@@ -47,10 +47,27 @@ grep -q '/home/satchel/machine/notes.md' "$tmp/home_c/.claude/CLAUDE.md"
 # /root and sent an agent looking for /root/machine/notes.md once.
 ! grep -q '~/machine\|~/projects' "$tmp/home_c/.claude/CLAUDE.md"
 printf 'USE PODMAN NOT DOCKER ON TESTBOX\n' > "$SATCHEL_DIR/sync/machines/testbox/notes.md"
+printf '<!-- satchel-machine-baseline version=2 generated=2026-07-23T01:02:03Z -->\n# Inventory\nINVENTORY_DETAIL_SHOULD_NOT_LOAD\n' \
+  > "$SATCHEL_DIR/sync/machines/testbox/inventory.md"
+mkdir -p "$SATCHEL_DIR/sync/machines/testbox/guides"
+printf '# Time Machine\nGUIDE_DETAIL_SHOULD_NOT_LOAD\n' \
+  > "$SATCHEL_DIR/sync/machines/testbox/guides/time-machine.md"
 write_memory_file claude "$tmp/home_c" "" "$tmp/work/app" 2>/dev/null
 grep -q 'USE PODMAN NOT DOCKER ON TESTBOX' "$tmp/home_c/.claude/CLAUDE.md"
+grep -q '/home/satchel/machine/inventory.md (generated 2026-07-23T01:02:03Z)' "$tmp/home_c/.claude/CLAUDE.md"
+grep -q '/home/satchel/machine/guides/time-machine.md.*Time Machine' "$tmp/home_c/.claude/CLAUDE.md"
+! grep -q 'INVENTORY_DETAIL_SHOULD_NOT_LOAD\|GUIDE_DETAIL_SHOULD_NOT_LOAD' "$tmp/home_c/.claude/CLAUDE.md"
+grep -q 'Resolved one-time fixes belong nowhere' "$tmp/home_c/.claude/CLAUDE.md"
 write_memory_file claude "$tmp/home_c" sample "$tmp/work/app" 2>/dev/null
 grep -q 'USE PODMAN NOT DOCKER ON TESTBOX' "$tmp/home_c/.claude/CLAUDE.md"
+
+# Normal launches are quiet; the materially dangerous Host Session warning
+# remains visible.
+HOST_MODE=0
+[ -z "$(announce_session_mode 2>&1)" ]
+HOST_MODE=1
+grep -q 'HOST SESSION' <<< "$(announce_session_mode 2>&1)"
+HOST_MODE=0
 
 # --with: extras are validated, normalized, mounted at their real paths,
 # and listed in the preamble; home and / are refused.
@@ -121,5 +138,14 @@ grep -q 'project=sample ' "$SATCHEL_DIR/sync/projects/sample/handoffs/2026-03-01
 grep -q '^## Goal' "$SATCHEL_DIR/sync/machines/testbox/handoffs/2026-03-01T00-00-00Z.md"
 [ ! -d "$SATCHEL_DIR/sync/projects/intruder" ]
 [ "$(file_multi_handoffs '2026-03-02T00:00:00Z' 'sample ' $'## Goal\nplain' 2>/dev/null)" = 0 ]
+
+# Handoff directories are bounded continuation state, not an incident archive.
+mkdir -p "$SATCHEL_DIR/sync/projects/retained/handoffs"
+for i in $(seq -w 1 12); do
+  file_handoff retained "2026-04-${i}T00:00:00Z" $'## Goal\nretention test' 2>/dev/null
+done
+[ "$(find "$SATCHEL_DIR/sync/projects/retained/handoffs" -type f -name '*.md' | wc -l)" = "$HANDOFF_RETENTION" ]
+[ ! -f "$SATCHEL_DIR/sync/projects/retained/handoffs/2026-04-01T00-00-00Z--testbox.md" ]
+[ -f "$SATCHEL_DIR/sync/projects/retained/handoffs/2026-04-12T00-00-00Z--testbox.md" ]
 
 printf 'ok: project enrollment and machine path decisions\n'

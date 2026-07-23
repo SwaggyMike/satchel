@@ -32,12 +32,14 @@ works in-session while key files never enter the container (the
 compositor socket is forwarded the same way, so pasting an image from the
 clipboard works (`SATCHEL_CLIPBOARD` turns it off — see ADR 0007). Log in once (or `satchel import claude` to
 copy the host's login); every session after that starts authenticated. After
-an agent has authenticated, its next normal launch offers to build baseline
-machine notes. If accepted, the agent inspects the real host through a
-read-only `/host` mount, shows its proposed notes for approval, writes only
-to the machine notes, and then continues into the session you originally
-requested. The prompt can be deferred or disabled; `satchel init` offers a
-later refresh for an already-initialized machine.
+an agent has authenticated, its next normal launch offers to build a machine
+baseline. If accepted, the agent inspects the real host through a read-only
+`/host` mount and shows its proposed files for approval. The broad, dated
+snapshot goes in `inventory.md`; only concise operational facts go in
+`notes.md`; substantial reusable procedures may go in topic guides. It then
+continues into the session you originally requested. The prompt can be
+deferred or disabled; `satchel init` offers a later refresh for an
+already-initialized machine.
 
 After the first meaningful session in a new directory, Satchel asks once whether
 to track it as a project. If accepted, the agent writes a short handoff; the
@@ -55,13 +57,17 @@ several tracked projects. Either way, work is filed by where it happened:
 at session end each tracked project you touched gets its own handoff, and
 work outside every project goes under the machine. Multi-project sessions
 see the list of visible projects and read each one's latest handoff on
-demand instead of loading them all up front.
+demand instead of loading them all up front. Each handoff directory keeps the
+latest ten files; older versions remain recoverable through Sync Repo history.
 
-Each machine also has notes (`machines/<name>/notes.md` in the sync repo):
-durable facts and procedures for that machine, shown to every session on it
-and editable from inside any session at `/home/satchel/machine/notes.md`. Agents record
-the right way to do machine-specific tasks as they find it and clean out
-entries that go stale; you can edit the file by hand too.
+Each machine has a small, always-loaded `notes.md` for enduring operational
+facts and machine-wide risks, a dated `inventory.md` read only when system
+detail matters, and optional `guides/*.md` for substantial reusable procedures.
+They live under `machines/<name>/` in the Sync Repo and are available inside
+sessions at `/home/satchel/machine/`. Notes are current truth, not incident
+history: resolved one-time fixes are forgotten, stale entries are removed,
+and detailed procedures stay out of the startup context. You can edit any of
+these files by hand too.
 
 ### Unraid (and other RAM-backed root filesystems)
 
@@ -121,9 +127,9 @@ judgment.)
 ## What syncs, what doesn't
 
 The Sync Repo's root `profile.md` and `preferences.md` are global. Project
-identity and timestamped handoffs live under `projects/`; host paths and
-tracking decisions live under `machines/<machine>/projects.json`. Global
-skills live under `skills/shared/`.
+identity and bounded timestamped handoffs live under `projects/`; host paths,
+tracking decisions, notes, inventory, and guides live under
+`machines/<machine>/`. Global skills live under `skills/shared/`.
 
 Handoffs, MCP registry + tokens (private repo, your SSH keys — see
 [ADR 0002](docs/adr/0002-mcp-tokens-in-sync-repo.md)), and the shared

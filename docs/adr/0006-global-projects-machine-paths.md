@@ -9,7 +9,8 @@ to the machine on which those paths exist.
 - A directory is not a Project until the user explicitly opts in. A Git repo
   is useful identity, but is neither required nor sufficient for enrollment.
 - `projects/<id>/project.json` records stable identity and an optional Git
-  remote. `projects/<id>/handoffs/` contains separate timestamped handoffs.
+  remote. `projects/<id>/handoffs/` contains timestamped handoffs, bounded to
+  the latest ten active files by ADR 0008.
 - `machines/<machine>/projects.json` maps absolute local paths to `tracked` or
   `rejected`. A tracked root covers descendants; a rejection applies only to
   the exact path.
