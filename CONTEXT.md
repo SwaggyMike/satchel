@@ -29,7 +29,7 @@ The single synced file listing the user's MCP servers (name, URL, token). At ses
 _Avoid_: integrations list, connectors
 
 **Skill Library**:
-The folder of agent skills carried whole in the Sync Repo, shared by both agents. Satchel mounts it into every session as that agent's own skills directory (`~/.claude/skills`, `~/.codex/skills`), exposes the exact path as `SATCHEL_SKILLS_DIR`, and explains the contract in the generated session instructions. Installing or removing a skill is just writing or deleting a complete folder there from inside any session; session-end sync makes the change available to both agents on every host. A newly installed skill is relied on from the next session, when agent-native discovery runs again.
+The folder of user-installed agent skills carried whole in the Sync Repo, shared by both agents. Satchel mounts it into every session as that agent's own skills directory (`~/.claude/skills`, `~/.codex/skills`), exposes the exact path as `SATCHEL_SKILLS_DIR`, and explains the contract in the generated session instructions. Installing or removing a skill is just writing or deleting a complete folder there from inside any session. At session end Satchel validates the library, locally quarantines malformed attempts while restoring any previous valid copy, and syncs valid changes to every host. Agent-owned runtime skills such as Codex's `.system` tree remain local and unsynced. A newly installed skill is relied on from the next session, when agent-native discovery runs again.
 _Avoid_: plugins, marketplace
 
 **Handoff**:

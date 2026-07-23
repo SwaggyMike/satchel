@@ -7,7 +7,10 @@ trap 'rm -rf "$tmp"' EXIT
 
 export HOME="$tmp/home"
 export SATCHEL_DIR="$tmp/state"
-mkdir -p "$HOME" "$SATCHEL_DIR/sync/.git" "$tmp/work"
+mkdir -p "$HOME" "$SATCHEL_DIR/sync" "$tmp/work"
+git init -q -b main "$SATCHEL_DIR/sync"
+git -C "$SATCHEL_DIR/sync" config user.name test
+git -C "$SATCHEL_DIR/sync" config user.email test@example.com
 printf 'MACHINE=testbox\nSYNC_URL=test\n' > "$SATCHEL_DIR/config"
 
 # Load functions without invoking main.
@@ -43,6 +46,59 @@ for agent in claude codex; do
   grep -q 'commits and pushes Skill' "$preamble"
   grep -q 'Start a new session' "$preamble"
 done
+
+# Runtime-owned Codex system skills stay local, while complete user skills
+# remain eligible for sync.
+ensure_skill_library
+grep -Fqx '/skills/shared/.system/' "$SATCHEL_DIR/sync/.gitignore"
+mkdir -p "$SATCHEL_DIR/sync/skills/shared/stable"
+printf '%s\n' '---' 'name: stable' 'description: stable' '---' \
+  > "$SATCHEL_DIR/sync/skills/shared/stable/SKILL.md"
+git -C "$SATCHEL_DIR/sync" add -A
+git -C "$SATCHEL_DIR/sync" commit -qm baseline
+
+mkdir -p \
+  "$SATCHEL_DIR/sync/skills/shared/good" \
+  "$SATCHEL_DIR/sync/skills/shared/missing" \
+  "$SATCHEL_DIR/sync/skills/shared/nested/.git" \
+  "$SATCHEL_DIR/sync/skills/shared/escape" \
+  "$SATCHEL_DIR/sync/skills/shared/.hidden" \
+  "$SATCHEL_DIR/sync/skills/shared/.system/generated"
+printf '%s\n' '---' 'name: good' 'description: good' '---' \
+  > "$SATCHEL_DIR/sync/skills/shared/good/SKILL.md"
+printf '%s\n' '---' 'name: nested' 'description: nested' '---' \
+  > "$SATCHEL_DIR/sync/skills/shared/nested/SKILL.md"
+printf '%s\n' '---' 'name: escape' 'description: escape' '---' \
+  > "$SATCHEL_DIR/sync/skills/shared/escape/SKILL.md"
+printf '%s\n' '---' 'name: hidden' 'description: hidden' '---' \
+  > "$SATCHEL_DIR/sync/skills/shared/.hidden/SKILL.md"
+ln -s "$tmp/outside" "$SATCHEL_DIR/sync/skills/shared/escape/outside"
+printf 'generated\n' > "$SATCHEL_DIR/sync/skills/shared/.system/generated/runtime"
+rm -f "$SATCHEL_DIR/sync/skills/shared/stable/SKILL.md"
+
+repair_skill_library 1 >/dev/null 2>&1
+[ -f "$SATCHEL_DIR/sync/skills/shared/good/SKILL.md" ]
+[ -f "$SATCHEL_DIR/sync/skills/shared/stable/SKILL.md" ]
+[ ! -e "$SATCHEL_DIR/sync/skills/shared/missing" ]
+[ ! -e "$SATCHEL_DIR/sync/skills/shared/nested" ]
+[ ! -e "$SATCHEL_DIR/sync/skills/shared/escape" ]
+[ ! -e "$SATCHEL_DIR/sync/skills/shared/.hidden" ]
+[ "$(find "$SKILL_QUARANTINE_DIR" -mindepth 1 -maxdepth 1 | wc -l)" = 5 ]
+! git -C "$SATCHEL_DIR/sync" status --short | grep -q 'skills/shared/.system'
+grep -q 'quarantined locally: 5' <(cmd_status 2>/dev/null)
+grep -q 'skills installed: good' <(report_skill_changes 2>&1)
+printf '\nupdated\n' >> "$SATCHEL_DIR/sync/skills/shared/stable/SKILL.md"
+grep -q 'skills updated: stable' <(report_skill_changes 2>&1)
+rm -rf -- "$SATCHEL_DIR/sync/skills/shared/stable"
+grep -q 'skills removed: stable' <(report_skill_changes 2>&1)
+
+# Ownership preparation targets only the two synced directories that agents
+# may edit, and requests quiet success reporting.
+owned=()
+fix_home_ownership() { owned+=("$1:${2:-0}"); }
+fix_synced_write_ownership
+[ "${owned[0]}" = "$SATCHEL_DIR/sync/skills/shared:1" ]
+[ "${owned[1]}" = "$SATCHEL_DIR/sync/machines/testbox:1" ]
 
 # Without a Sync Repo Satchel still identifies itself, but must not claim a
 # shared/persistent Skill Library exists.

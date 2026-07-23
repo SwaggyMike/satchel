@@ -128,10 +128,18 @@ installers.
 
 Ask the agent to install a skill and it writes the complete folder there,
 including `SKILL.md` and any referenced `references/`, `scripts/`, or `assets/`
-files. Satchel commits and pushes the change when the session exits even when
-there is no handoff; `satchel sync` retries a failed/offline push. Start a new
-session before relying on the newly installed skill being discovered
-automatically.
+files. Satchel validates the result when the session exits. A malformed skill
+(missing `SKILL.md`, nested Git metadata, an unsafe name, or an escaping
+symlink) is preserved locally under `.satchel/quarantine/skills/` instead of
+being synced; an existing valid version is restored. Valid installs, updates,
+and removals are listed, committed, and pushed even when there is no handoff;
+`satchel sync` retries a failed/offline push.
+
+Codex's bundled `.system` skills are runtime files tied to the installed Codex
+version, so they stay local and are ignored by the Sync Repo. Only
+user-installed skills sync across the caravan. Start a new session before
+relying on a newly installed skill being discovered automatically. `satchel
+status` reports any locally quarantined attempts that still need attention.
 
 ## Commands
 
