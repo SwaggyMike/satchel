@@ -48,32 +48,6 @@ touch "$tmp/claude/.claude/.credentials.json" "$tmp/codex/.codex/auth.json"
 baseline_authenticated claude "$tmp/claude"
 baseline_authenticated codex "$tmp/codex"
 
-# Ownership repair must work with hosts whose find lacks GNU's -printf (for
-# example BusyBox-based appliances). A rejecting wrapper would make the old
-# set -e/pipefail implementation silently terminate the whole session launch.
-portable_home="$tmp/portable-home"
-portable_bin="$tmp/portable-bin"
-repair_engine="$tmp/repair-engine"
-repair_log="$tmp/repair.log"
-real_find="$(command -v find)"
-mkdir -p "$portable_home" "$portable_bin"
-touch "$portable_home/root-owned"
-printf '%s\n' \
-  '#!/usr/bin/env bash' \
-  'for arg in "$@"; do [ "$arg" != -printf ] || exit 64; done' \
-  'exec "$REAL_FIND" "$@"' > "$portable_bin/find"
-printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "$REPAIR_LOG"\n' > "$repair_engine"
-chmod 755 "$portable_bin/find" "$repair_engine"
-old_path="$PATH"
-PATH="$portable_bin:$PATH"
-export PATH REAL_FIND="$real_find" REPAIR_LOG="$repair_log"
-SATCHEL_UID=12345 SATCHEL_GID=12345 ENGINE="$repair_engine"
-fix_home_ownership "$portable_home"
-PATH="$old_path"
-export PATH
-SATCHEL_UID=1000 SATCHEL_GID=1000 ENGINE=docker
-grep -q 'chown -R 12345:12345 /reclaim' "$repair_log"
-
 # Baseline refreshes launched by `satchel init` must perform the same agent-
 # home ownership repair as ordinary sessions before Codex reads config.toml.
 repaired=()

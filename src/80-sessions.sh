@@ -117,10 +117,7 @@ compose_run_args() { # compose_run_args <agent> <home> <project>
 fix_home_ownership() { # fix_home_ownership <path> [quiet]
   podman_rootless && return 0
   local count quiet="${2:-0}"
-  if ! count="$(find "$1" ! -user "$SATCHEL_UID" -print 2>/dev/null | wc -l)"; then
-    warn "could not inspect ownership in $1 — sessions may hit permission errors"
-    return 0
-  fi
+  count="$(find "$1" ! -user "$SATCHEL_UID" -printf . 2>/dev/null | wc -c)"
   [ "$count" -gt 0 ] || return 0
   local label=()
   if selinux_active; then label=(--security-opt label=disable); fi
