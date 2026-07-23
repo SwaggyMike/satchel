@@ -168,7 +168,8 @@ local. Program-only removal deletes the installed command, Satchel-owned
 shims, and the container image while keeping the Sync Repo clone, agent
 logins, and transcripts for a future reinstall. Everything also permanently
 deletes that local state, but never the remote Sync Repo. For automation,
-`--yes` keeps local state and `--purge --yes` removes it.
+`--yes` keeps local state and `--purge --yes` removes it. Purging loses any
+uncommitted or unpushed work in the local Sync Repo clone.
 
 ## What syncs, what doesn't
 

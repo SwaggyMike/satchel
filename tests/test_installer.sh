@@ -368,7 +368,11 @@ set -e
 [ "$rc" -eq 0 ] || fail "declining satchel uninstall failed (rc=$rc)" "$output"
 [ -x "$cancel_bin/satchel" ] || fail "declining uninstall still removed the command" "$output"
 grep -q '1) Program only' <<< "$output" || fail "uninstall did not offer program-only removal" "$output"
-grep -q '2) Everything' <<< "$output" || fail "uninstall did not offer complete removal" "$output"
+grep -q '2) Everything local' <<< "$output" || fail "uninstall did not offer complete removal" "$output"
+grep -q 'upstream private Sync Repo is NOT deleted' <<< "$output" \
+  || fail "uninstall did not protect the upstream Sync Repo before selection" "$output"
+grep -q 'Uncommitted or unpushed work is lost' <<< "$output" \
+  || fail "uninstall did not warn about unsynced local work before selection" "$output"
 grep -q 'cancelled' <<< "$output" || fail "declined uninstall was not reported as cancelled" "$output"
 
 printf 'ok: satchel uninstall defaults to cancellation\n'

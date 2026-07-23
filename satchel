@@ -297,7 +297,9 @@ choose_uninstall_scope() {
     'What should Satchel uninstall?' \
     '' \
     '  1) Program only — remove command, shims, and image; keep local data for reinstall' \
-    "  2) Everything — also permanently delete local state at $state" \
+    "  2) Everything local — also permanently delete $state" \
+    '     Deletes local logins, tokens, transcripts, configuration, and the Sync Repo clone.' \
+    '     The upstream private Sync Repo is NOT deleted. Uncommitted or unpushed work is lost.' \
     '  3) Cancel' >&2
   read -r -p "$(prompt_text 'Choice [3]: ')" reply || reply=""
   case "$reply" in
