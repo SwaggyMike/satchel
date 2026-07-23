@@ -21,7 +21,8 @@ mkdir -p "$test_home/.local/bin"
 ln -s "$test_home/missing-node/lib/codex.js" "$test_home/.local/bin/codex"
 
 set +e
-output="$(HOME="$test_home" bash "$repo_dir/install.sh" </dev/null 2>&1)"
+output="$(HOME="$test_home" SATCHEL_BIN="$test_home/.local/bin" \
+  bash "$repo_dir/install.sh" </dev/null 2>&1)"
 rc=$?
 set -e
 
