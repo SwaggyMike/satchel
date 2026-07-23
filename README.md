@@ -16,8 +16,9 @@ curl -fsSL https://raw.githubusercontent.com/SwaggyMike/satchel/main/install.sh 
 
 The installer chains straight into `satchel init`, which names the machine
 and connects your private Sync Repo (self-hosted Gitea, private GitHub repo,
-a bare repo on any SSH box, or a local bare repo on a shared NFS mount). Then,
-in any directory:
+a bare repo on any SSH box, or a local bare repo on a shared NFS mount). It
+also ensures the shared agent container image is built before reporting that
+an initialized installation is ready. Then, in any directory:
 
 ```sh
 claude        # Claude Code in a throwaway container, scoped to this directory
@@ -158,6 +159,7 @@ status` reports any locally quarantined attempts that still need attention.
 | `satchel mcp add\|list\|remove` | manage the MCP Registry (configured once, wired into every session) |
 | `satchel settings` | show every setting and its value; `satchel settings <KEY> <value>` sets it caravan-wide, `--local` for one machine |
 | `satchel doctor` | check this machine's setup end to end — engine, image, key, sync, MCP endpoints |
+| `satchel image` | build the shared agent image if it is missing |
 | `satchel update` | self-update from `main` (lists the commits it pulls in) and rebuild the agent image |
 | `satchel uninstall` | remove Satchel and its shims while preserving local state; `--purge` also deletes local state |
 

@@ -8,8 +8,17 @@ image_exists() {
 
 ensure_image() {
   image_exists && return 0
-  info "container image not found — building it (first run only, takes a few minutes)"
+  info "container image not found — building it (takes a few minutes)"
   build_image
+}
+
+cmd_image() {
+  [ $# -eq 0 ] || die "usage: satchel image"
+  if image_exists; then
+    info "container image already built; nothing to do"
+  else
+    ensure_image
+  fi
 }
 
 build_image() {

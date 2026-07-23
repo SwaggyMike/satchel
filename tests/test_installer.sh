@@ -11,7 +11,20 @@ fail() { printf 'FAIL: %s\n' "$1" >&2; [ $# -gt 1 ] && printf '%s\n' "$2" >&2; e
 # so the tests run on machines without docker/podman.
 stub_bin="$test_home/stub-bin"
 mkdir -p "$stub_bin"
-printf '#!/usr/bin/env bash\nexit 0\n' > "$stub_bin/docker"
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'if [ -n "${SATCHEL_TEST_ENGINE_LOG:-}" ]; then' \
+  '  printf "%s\n" "$*" >> "$SATCHEL_TEST_ENGINE_LOG"' \
+  '  case "${1:-} ${2:-}" in' \
+  '    "image inspect") [ -f "$SATCHEL_TEST_IMAGE_STATE" ]; exit ;;' \
+  '    "image rm") rm -f "$SATCHEL_TEST_IMAGE_STATE"; exit 0 ;;' \
+  '  esac' \
+  '  if [ "${1:-}" = build ]; then' \
+  '    [ "${SATCHEL_TEST_BUILD_FAIL:-0}" != 1 ] || exit 42' \
+  '    touch "$SATCHEL_TEST_IMAGE_STATE"' \
+  '  fi' \
+  'fi' \
+  'exit 0' > "$stub_bin/docker"
 chmod 755 "$stub_bin/docker"
 export PATH="$stub_bin:$PATH"
 
@@ -54,6 +67,61 @@ for shim in claude codex; do
 done
 
 printf 'ok: SATCHEL_BIN install is self-contained\n'
+
+# --- initialized installs leave the shared agent image ready ---------------
+
+ready_bin="$test_home/image-ready"
+ready_state="$ready_bin/.satchel"
+ready_log="$test_home/image-ready.log"
+ready_marker="$test_home/image-ready.marker"
+mkdir -p "$ready_state/sync/.git"
+printf 'MACHINE=image-ready\nSYNC_URL=git@example.test:sync.git\n' > "$ready_state/config"
+
+set +e
+output="$(HOME="$test_home" SATCHEL_BIN="$ready_bin" SATCHEL_SHIMS=n \
+  SATCHEL_TEST_ENGINE_LOG="$ready_log" SATCHEL_TEST_IMAGE_STATE="$ready_marker" \
+  bash "$repo_dir/install.sh" </dev/null 2>&1)"
+rc=$?
+set -e
+
+[ "$rc" -eq 0 ] || fail "initialized installer did not prepare the image (rc=$rc)" "$output"
+[ -f "$ready_marker" ] || fail "initialized installer did not create the image marker" "$output"
+[ "$(grep -c '^build ' "$ready_log")" -eq 1 ] \
+  || fail "initialized installer did not build one missing image" "$(cat "$ready_log")"
+grep -q 'ready to launch claude or codex' <<< "$output" \
+  || fail "installer did not report the initialized installation as ready" "$output"
+
+: > "$ready_log"
+output="$(HOME="$test_home" SATCHEL_BIN="$ready_bin" SATCHEL_SHIMS=n \
+  SATCHEL_TEST_ENGINE_LOG="$ready_log" SATCHEL_TEST_IMAGE_STATE="$ready_marker" \
+  bash "$repo_dir/install.sh" </dev/null 2>&1)"
+[ "$(grep -c '^build ' "$ready_log" || true)" -eq 0 ] \
+  || fail "installer rebuilt an image that already existed" "$(cat "$ready_log")"
+
+printf 'ok: initialized install ensures one missing image\n'
+
+# A failed build leaves the installed command available and gives one exact,
+# deterministic retry instead of deferring another surprise to first launch.
+failed_bin="$test_home/image-failed"
+failed_state="$failed_bin/.satchel"
+failed_log="$test_home/image-failed.log"
+failed_marker="$test_home/image-failed.marker"
+mkdir -p "$failed_state/sync/.git"
+printf 'MACHINE=image-failed\nSYNC_URL=git@example.test:sync.git\n' > "$failed_state/config"
+
+set +e
+output="$(HOME="$test_home" SATCHEL_BIN="$failed_bin" SATCHEL_SHIMS=n \
+  SATCHEL_TEST_ENGINE_LOG="$failed_log" SATCHEL_TEST_IMAGE_STATE="$failed_marker" \
+  SATCHEL_TEST_BUILD_FAIL=1 bash "$repo_dir/install.sh" </dev/null 2>&1)"
+rc=$?
+set -e
+
+[ "$rc" -ne 0 ] || fail "installer reported success after the image build failed" "$output"
+[ -x "$failed_bin/satchel" ] || fail "failed image build removed the installed command" "$output"
+grep -q "retry: $failed_bin/satchel image" <<< "$output" \
+  || fail "failed image build did not print the exact retry command" "$output"
+
+printf 'ok: failed install image build is retryable\n'
 
 # SATCHEL_BIN is a directory, so a value occupying PATH's `satchel` command
 # slot must be rejected before it creates the crate-test collision.

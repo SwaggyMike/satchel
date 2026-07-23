@@ -39,6 +39,7 @@ setup
   satchel settings             show every setting; 'satchel settings <KEY> <value>'
                              sets it caravan-wide (--local: this machine only)
 
+  satchel image                build the shared agent image if it is missing
   satchel update               self-update from git main + rebuild the image
   satchel version
 

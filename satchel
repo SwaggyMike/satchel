@@ -818,8 +818,17 @@ image_exists() {
 
 ensure_image() {
   image_exists && return 0
-  info "container image not found — building it (first run only, takes a few minutes)"
+  info "container image not found — building it (takes a few minutes)"
   build_image
+}
+
+cmd_image() {
+  [ $# -eq 0 ] || die "usage: satchel image"
+  if image_exists; then
+    info "container image already built; nothing to do"
+  else
+    ensure_image
+  fi
 }
 
 build_image() {
@@ -2488,11 +2497,7 @@ cmd_init() {
     warn "no sync repo — sessions work, but handoffs/MCP/skills stay on this machine"
   fi
 
-  if image_exists; then
-    info "container image already built; skipping rebuild"
-  elif confirm_yes "build the container image now? (a few minutes; otherwise it builds on first session)"; then
-    build_image
-  fi
+  cmd_image
   [ "$was_initialized" -eq 0 ] || offer_baseline_refresh
   success "done. try: cd <a project> && satchel claude"
 }
@@ -2946,6 +2951,7 @@ setup
   satchel settings             show every setting; 'satchel settings <KEY> <value>'
                              sets it caravan-wide (--local: this machine only)
 
+  satchel image                build the shared agent image if it is missing
   satchel update               self-update from git main + rebuild the image
   satchel version
 
@@ -3031,6 +3037,7 @@ main() {
     unlink)            cmd_unlink "$@" ;;
     uninstall)         cmd_uninstall "$@" ;;
     import)            cmd_import "$@" ;;
+    image)             cmd_image "$@" ;;
     update)            cmd_update "$@" ;;
     version|--version) out_header "satchel $SATCHEL_VERSION" ;;
     help|--help|-h)    cmd_help ;;

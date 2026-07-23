@@ -30,6 +30,7 @@ main() {
     unlink)            cmd_unlink "$@" ;;
     uninstall)         cmd_uninstall "$@" ;;
     import)            cmd_import "$@" ;;
+    image)             cmd_image "$@" ;;
     update)            cmd_update "$@" ;;
     version|--version) out_header "satchel $SATCHEL_VERSION" ;;
     help|--help|-h)    cmd_help ;;

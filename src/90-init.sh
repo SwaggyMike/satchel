@@ -140,11 +140,7 @@ cmd_init() {
     warn "no sync repo — sessions work, but handoffs/MCP/skills stay on this machine"
   fi
 
-  if image_exists; then
-    info "container image already built; skipping rebuild"
-  elif confirm_yes "build the container image now? (a few minutes; otherwise it builds on first session)"; then
-    build_image
-  fi
+  cmd_image
   [ "$was_initialized" -eq 0 ] || offer_baseline_refresh
   success "done. try: cd <a project> && satchel claude"
 }

@@ -192,7 +192,14 @@ if [ -f "$STATE_DIR/config" ]; then
   if [ -z "$SYNC_URL" ] || [ -d "$STATE_DIR/sync/.git" ]; then initialized=1; fi
 fi
 if [ "$initialized" -eq 1 ]; then
-  say "done — already initialized ('satchel status' to check the caravan)"
+  say "already initialized — ensuring the container image is ready…"
+  if ! "$BIN/satchel" image; then
+    printf -v retry '%q image' "$BIN/satchel"
+    say "ERROR: Satchel was installed, but the container image build failed."
+    say "retry: $retry"
+    exit 1
+  fi
+  say "done — ready to launch claude or codex"
 elif { : </dev/tty; } 2>/dev/null; then
   say "starting setup…"
   "$BIN/satchel" init </dev/tty || say "setup did not finish — fix the issue above and run: satchel init"
