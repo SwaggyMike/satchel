@@ -4,6 +4,26 @@
 MCP_FILE="$SYNC_DIR/mcp.json"
 SYNC_TOKENS_FILE="$SYNC_DIR/mcp-tokens.env"
 
+mcp_name_valid() {
+  [[ "$1" =~ ^[A-Za-z0-9_-]+$ ]]
+}
+
+validate_mcp_state() {
+  [ -f "$MCP_FILE" ] || return 0
+  jq -e '
+    type == "object"
+    and (keys == ["servers"])
+    and (.servers | type == "object")
+    and all(.servers | to_entries[];
+      (.key | test("^[A-Za-z0-9_-]+$"))
+      and (.value | type == "object")
+      and ((.value | keys) == ["auth", "url"])
+      and (.value.url | type == "string" and length > 0)
+      and (.value.auth == "bearer" or .value.auth == "none"))
+  ' "$MCP_FILE" >/dev/null \
+    || die "invalid mcp.json — expected safely named servers with url and bearer/none auth fields"
+}
+
 token_for() { # token_for <name> → prints token or nothing (local overrides synced)
   local name="$1" line
   for f in "$LOCAL_TOKENS_FILE" "$SYNC_TOKENS_FILE"; do
@@ -79,6 +99,7 @@ compose_codex_mcp_env() { # appends to RUN_ARGS
 
 cmd_mcp() {
   sync_ready || die "sync is not set up — run 'satchel init' first"
+  validate_mcp_state
   local sub="${1:-list}"; shift || true
   case "$sub" in
     list)
@@ -103,7 +124,7 @@ cmd_mcp() {
         if ! confirm_yes "  does it need a bearer token?"; then auth="none"; fi
       fi
       [ "${3:-}" = "--no-auth" ] && auth="none"
-      printf '%s' "$name" | grep -Eq '^[a-zA-Z0-9_-]+$' || die "server name must be [a-zA-Z0-9_-]"
+      mcp_name_valid "$name" || die "server name must be [a-zA-Z0-9_-]"
       [ -f "$MCP_FILE" ] || printf '{ "servers": {} }\n' > "$MCP_FILE"
       jq --arg n "$name" --arg u "$url" --arg a "$auth" \
         '.servers[$n] = {url: $u, auth: $a}' "$MCP_FILE" > "$MCP_FILE.tmp"
@@ -133,6 +154,7 @@ cmd_mcp() {
           || die "not a valid choice: $choice"
         name="${names[$((choice - 1))]}"
       fi
+      mcp_name_valid "$name" || die "server name must be [a-zA-Z0-9_-]"
       [ -f "$MCP_FILE" ] && { jq --arg n "$name" 'del(.servers[$n])' "$MCP_FILE" > "$MCP_FILE.tmp"; mv "$MCP_FILE.tmp" "$MCP_FILE"; }
       for f in "$LOCAL_TOKENS_FILE" "$SYNC_TOKENS_FILE"; do
         [ -f "$f" ] && { grep -v "^${name}=" "$f" > "$f.tmp" || true; mv "$f.tmp" "$f"; chmod 600 "$f"; }
@@ -170,6 +192,7 @@ prompt_token() { # ADR 0002: offer synced (default) or local-only storage
 materialize_mcp() {
   local agent="$1" home="$2"
   [ -f "$MCP_FILE" ] || return 0
+  validate_mcp_state
   local servers="{}" block="" name url auth token
   while IFS=$'\t' read -r name url auth; do
     token="$(token_for "$name")"

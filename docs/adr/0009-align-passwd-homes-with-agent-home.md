@@ -35,9 +35,10 @@ notes"). The only reader of a machine's notes was that machine itself.
   `--userns=keep-id`, so a custom `SATCHEL_UID` absent from the image's
   passwd gets the same home. Docker with a custom UID keeps today's
   behavior (no passwd entry at all); accepted — no caravan machine does that.
-- Host key files are still never copied or consumed automatically; auth
-  stays with the forwarded agent (ADR 0005). This fix is about ssh's
-  *state directory*, not its credentials.
+- Host key files are still never copied into a session. Authentication stays
+  behind a forwarded agent socket; ADR 0005 permits Satchel's host process to
+  load a standard key into a temporary per-session agent. This passwd fix is
+  about ssh's *state directory*, not exposing credentials.
 - `compose_run_args` mounts `$SYNC_DIR/machines` read-only at
   `/home/satchel/machines`, and the preamble points to it. Writes still go
   only through the machine's own rw `/home/satchel/machine` mount, so
@@ -48,9 +49,9 @@ notes"). The only reader of a machine's notes was that machine itself.
 - known_hosts (and anything else ssh drops in `~/.ssh`) now lands in the
   persistent agent home and survives across sessions; first-contact hosts
   are recorded once per machine instead of once per session.
-- Apollo's outbound-SSH guide shrinks to the one part a passwd fix cannot
-  replace: choosing the machine identity explicitly
-  (`-i /host/boot/config/ssh/root/id_ed25519`) when no agent is available.
+- Machine-specific outbound-SSH workarounds are unnecessary when a standard
+  host key is present: ADR 0005 supplies it through a temporary agent without
+  mounting the key.
 - The fix rides the normal `satchel update` (which always rebuilds the
   image); machines that skip the update keep the old behavior, nothing
   breaks harder than before.

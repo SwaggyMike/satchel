@@ -9,6 +9,7 @@ rollback_retirement() { # rollback_retirement <pre-retirement-head> <machine>
 
 retire_machine_from_caravan() { # retire_machine_from_caravan <machine> [strict]
   local target="$1" strict="${2:-0}" before
+  valid_machine_name "$target" || die "invalid or unsafe machine name '$target'"
   ensure_sync_identity
 
   if [ "$strict" -eq 1 ]; then
@@ -48,6 +49,7 @@ retire_machine_from_caravan() { # retire_machine_from_caravan <machine> [strict]
 cmd_retire() {
   sync_ready || die "sync is not set up — run 'satchel init' first"
   quiet_pull
+  validate_sync_state
   local target="${1:-}"
   if [ -z "$target" ]; then
     local names=() m marker i
@@ -69,6 +71,7 @@ cmd_retire() {
       || die "not a valid choice: $choice"
     target="${names[$((choice - 1))]}"
   fi
+  valid_machine_name "$target" || die "invalid or unsafe machine name '$target'"
   [ -d "$SYNC_DIR/machines/$target" ] || die "no machine '$target' in the caravan"
 
   confirm "retire '$target' — delete its folder from the Sync Repo? (git history keeps it)" || { info "cancelled"; return 0; }
@@ -77,7 +80,11 @@ cmd_retire() {
   if [ "$target" = "$MACHINE" ]; then
     warn "that was this machine — its local state ($SATCHEL_DIR) still exists: config, agent logins, the sync clone"
     if confirm "delete the local state too? (agent logins in sessions will be lost)"; then
-      rm -rf "$SATCHEL_DIR"
+      local state install_dir
+      state="$(readlink -f "$SATCHEL_DIR")"
+      install_dir="$(dirname "$(readlink -f "$0")")"
+      validate_state_removal_path "$state" "$install_dir"
+      remove_tree_for_uninstall "$state"
       info "removed $SATCHEL_DIR — this machine is fully retired"
     fi
   fi

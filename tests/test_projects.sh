@@ -106,6 +106,12 @@ HOST_MODE=0 UNSAFE_HOME=0
 ! (cd "$HOME" && session_mount_guard claude </dev/null 2>/dev/null)
 ! (cd / && session_mount_guard claude </dev/null 2>/dev/null)
 (cd "$tmp/work/app" && session_mount_guard claude </dev/null)
+ln -s "$HOME" "$tmp/work/home-link"
+! (cd "$tmp/work/home-link" && session_mount_guard claude </dev/null 2>/dev/null)
+! (cd "$SATCHEL_DIR" && session_mount_guard claude </dev/null 2>/dev/null)
+WITH_DIRS=("$SATCHEL_DIR")
+! (with_dirs_guard 2>/dev/null)
+WITH_DIRS=()
 UNSAFE_HOME=1
 (cd "$HOME" && session_mount_guard claude </dev/null)
 UNSAFE_HOME=0

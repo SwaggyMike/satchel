@@ -129,6 +129,18 @@ remove_tree_for_uninstall() { # validated exact state tree only; sudo fallback
   sudo rm -rf -- "$path"
 }
 
+validate_state_removal_path() { # validate_state_removal_path <state> <install-dir>
+  local state="$1" install_dir="$2" home_real
+  home_real="$(readlink -f "$HOME")"
+  case "$state" in
+    /|"$home_real"|"$install_dir") die "refusing to remove unsafe state path $state" ;;
+  esac
+  if [ ! -f "$state/config" ] && [ ! -f "$state/install-path" ] \
+     && [ ! -d "$state/sync" ] && [ ! -d "$state/home" ]; then
+    die "$state does not look like a Satchel state directory — refusing to remove it"
+  fi
+}
+
 installed_satchel_path() { # true only for an installer-owned script location
   local self="$1" recorded="" self_dir candidate
   self_dir="$(dirname "$self")"
@@ -257,7 +269,7 @@ offer_uninstall_retirement() {
 }
 
 cmd_uninstall() {
-  local purge=0 yes=0 interactive=1 arg self install_dir state home_real p target agent ahead
+  local purge=0 yes=0 interactive=1 arg self install_dir state p target agent ahead
   local shim_root seen_key scope seen_shims=$'\n'
   for arg in "$@"; do
     case "$arg" in
@@ -273,7 +285,6 @@ cmd_uninstall() {
     || die "$self does not look like an installed Satchel command — refusing to remove a checkout or arbitrary script"
   install_dir="$(dirname "$self")"
   state="$(readlink -f "$SATCHEL_DIR")"
-  home_real="$(readlink -f "$HOME")"
 
   if [ "$yes" -eq 0 ] && [ "$purge" -eq 0 ]; then
     scope="$(choose_uninstall_scope "$state")"
@@ -285,13 +296,7 @@ cmd_uninstall() {
   fi
 
   if [ "$purge" -eq 1 ]; then
-    case "$state" in
-      /|"$home_real"|"$install_dir") die "refusing to purge unsafe state path $state" ;;
-    esac
-    if [ ! -f "$state/config" ] && [ ! -f "$state/install-path" ] \
-       && [ ! -d "$state/sync" ] && [ ! -d "$state/home" ]; then
-      die "$state does not look like a Satchel state directory — refusing to purge it"
-    fi
+    validate_state_removal_path "$state" "$install_dir"
     if [ -d "$state/sync/.git" ] && [ -n "$(git -C "$state/sync" status --porcelain 2>/dev/null)" ]; then
       warn "the local Sync Repo has uncommitted changes; --purge will delete them"
     fi

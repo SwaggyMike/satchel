@@ -63,6 +63,8 @@ cmd_init() {
   sync_ready && was_initialized=1
   read -r -p "$(prompt_text "machine name [$MACHINE]: ")" name
   name="$(slugify "${name:-$MACHINE}")"
+  valid_machine_name "$name" \
+    || die "machine name must start with a letter or number and contain only letters, numbers, dots, underscores, and hyphens"
   read -r -p "$(prompt_text "sync repo URL (private git repo; empty to skip sync for now)${SYNC_URL:+ [$SYNC_URL]}: ")" url
   url="${url:-$SYNC_URL}"
 

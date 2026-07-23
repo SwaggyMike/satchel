@@ -66,5 +66,9 @@ need_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "'$1' is required but not installed"
 }
 
+valid_machine_name() {
+  [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]
+}
+
 # Where shims live — same priority as install.sh so 'satchel link' puts them
 # where the installer would have.

@@ -27,7 +27,7 @@ cmd_status() {
   if ! sync_ready; then
     printf '  sync: not set up (run satchel init)\n'
   else
-    validate_project_state
+    validate_sync_state
     printf '  sync: %s\n' "$SYNC_URL"
     printf '  last sync commit: %s\n' "$(git_sync log -1 --format='%h %s (%cr)' 2>/dev/null || echo none)"
     local bv; bv="$(baseline_marker_version)"

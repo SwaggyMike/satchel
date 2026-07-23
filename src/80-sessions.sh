@@ -109,32 +109,48 @@ compose_run_args() { # compose_run_args <agent> <home> <project>
   return 0
 }
 
-# A Host Session runs as root in the container, and on docker that leaves
-# root-owned files in the agent home — which breaks every later session on
-# this machine (config writes fail with permission errors). Reclaim them with
-# a one-off root container; rootless podman maps container root back to the
-# user, so there is never anything to heal there.
-fix_home_ownership() { # fix_home_ownership <path> [quiet]
+# A Host Session runs as root in the container, and a root-run host creates
+# files as root before a normal UID-1000 session. Normalize only Satchel's
+# documented writable state. Success is routine and silent; failures explain
+# the exact internal path without implying that project or host files changed.
+ownership_path_allowed() {
+  local target state claude_home codex_home skills machine
+  [ -e "$1" ] && [ ! -L "$1" ] || return 1
+  target="$(readlink -f "$1")"
+  state="$(readlink -f "$SATCHEL_DIR")"
+  claude_home="$state/home/claude"
+  codex_home="$state/home/codex"
+  skills="$state/sync/skills/shared"
+  machine="$state/sync/machines/$MACHINE"
+  case "$target" in
+    "$claude_home"|"$codex_home"|"$skills"|"$machine") return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+fix_home_ownership() { # fix_home_ownership <Satchel-managed-path>
+  ownership_path_allowed "$1" \
+    || die "refusing ownership repair outside Satchel-managed writable state: $1"
   podman_rootless && return 0
-  local count quiet="${2:-0}"
+  local count
   count="$(find "$1" ! -user "$SATCHEL_UID" -printf . 2>/dev/null | wc -c)"
   [ "$count" -gt 0 ] || return 0
   local label=()
   if selinux_active; then label=(--security-opt label=disable); fi
   if "$(engine)" run --rm --label "$MANAGED_CONTAINER_LABEL" --user 0:0 \
-      "${label[@]}" -v "$1:/reclaim" "$IMAGE" \
-      chown -R "$SATCHEL_UID:$SATCHEL_GID" /reclaim; then
-    [ "$quiet" -eq 1 ] || info "restored ownership of $count items in $1 to $SATCHEL_UID:$SATCHEL_GID"
+      "${label[@]}" -v "$1:/satchel-data" "$IMAGE" \
+      chown -R "$SATCHEL_UID:$SATCHEL_GID" /satchel-data; then
+    :
   else
-    warn "could not restore ownership in $1 — sessions may hit permission errors"
+    warn "could not prepare Satchel's internal data at $1 for the normal session user"
   fi
 }
 
 fix_synced_write_ownership() {
   sync_ready || return 0
   mkdir -p "$SYNC_DIR/skills/shared" "$SYNC_DIR/machines/$MACHINE"
-  fix_home_ownership "$SYNC_DIR/skills/shared" 1
-  fix_home_ownership "$SYNC_DIR/machines/$MACHINE" 1
+  fix_home_ownership "$SYNC_DIR/skills/shared"
+  fix_home_ownership "$SYNC_DIR/machines/$MACHINE"
 }
 
 # The sandbox promise is "the container sees only the project directory" —
@@ -142,10 +158,23 @@ fix_synced_write_ownership() {
 # logins) or an ancestor of it. Host Sessions mount / on purpose, so no guard.
 session_mount_guard() {
   [ "$HOST_MODE" -eq 1 ] && return 0
-  [ "$UNSAFE_HOME" -eq 1 ] && return 0
-  local bad=0 where="your home directory"
-  [ "$PWD" = "/" ] && { bad=1; where="/"; }
-  case "$HOME" in "$PWD"|"$PWD"/*) bad=1 ;; esac
+  local project home state bad=0 where="your home directory"
+  project="$(readlink -f "${2:-$PWD}" 2>/dev/null)" \
+    || die "could not resolve session directory ${2:-$PWD}"
+  home="$(readlink -f "$HOME")"
+  state="$(readlink -f "$SATCHEL_DIR" 2>/dev/null || printf '%s' "$SATCHEL_DIR")"
+  if [ "$project" = "/" ]; then
+    bad=1; where="/"
+  else
+    case "$home" in "$project"|"$project"/*) bad=1; where="your home directory" ;; esac
+    if [ "$bad" -eq 0 ]; then
+      case "$state" in "$project"|"$project"/*) bad=1; where="Satchel's private state directory" ;; esac
+      case "$project" in "$state"|"$state"/*) bad=1; where="Satchel's private state directory" ;; esac
+    fi
+  fi
+  if [ "$UNSAFE_HOME" -eq 1 ] && [ "$where" != "Satchel's private state directory" ]; then
+    return 0
+  fi
   [ "$bad" -eq 1 ] || return 0
   # A sandboxed session here would mount everything that matters (SSH keys,
   # MCP tokens, logins) while still claiming to be a sandbox. Offer the
@@ -158,6 +187,9 @@ session_mount_guard() {
     info "cd into a project directory, or run 'satchel --unsafe-home $1' for a sandboxed session here"
     exit 1
   fi
+  if [ "$where" = "Satchel's private state directory" ]; then
+    die "refusing to mount Satchel's private state directory into a session"
+  fi
   die "refusing to start a session in $PWD — that would mount your entire home directory (SSH keys, MCP tokens, logins) read-write into the sandbox.
        cd into a project directory, or run 'satchel --unsafe-home $1' if you really mean it."
 }
@@ -167,13 +199,21 @@ session_mount_guard() {
 # or /, no matter the flags. Paths are normalized so the mount, the
 # preamble, and the in-session paths all agree.
 with_dirs_guard() {
-  local i w
+  local i w home state
+  home="$(readlink -f "$HOME")"
+  state="$(readlink -f "$SATCHEL_DIR" 2>/dev/null || printf '%s' "$SATCHEL_DIR")"
   for i in "${!WITH_DIRS[@]}"; do
     w="$(readlink -f "${WITH_DIRS[$i]}" 2>/dev/null)" || w=""
     [ -n "$w" ] && [ -d "$w" ] || die "--with ${WITH_DIRS[$i]}: not a directory"
     [ "$w" = / ] && die "--with ${WITH_DIRS[$i]}: refusing to mount /"
-    case "$(readlink -f "$HOME")" in
+    case "$home" in
       "$w"|"$w"/*) die "--with $w: refusing to mount your home directory (SSH keys, MCP tokens, logins)" ;;
+    esac
+    case "$state" in
+      "$w"|"$w"/*) die "--with $w: refusing to mount Satchel's private state directory" ;;
+    esac
+    case "$w" in
+      "$state"|"$state"/*) die "--with $w: refusing to mount Satchel's private state directory" ;;
     esac
     WITH_DIRS[$i]="$w"
   done
@@ -198,23 +238,23 @@ cmd_session() {
   done
   set -- "${args[@]}"
   need_cmd git; need_cmd jq
-  session_mount_guard "$agent"
+  local project slug home
+  project="$(readlink -f "$PWD" 2>/dev/null)" || die "could not resolve session directory $PWD"
+  session_mount_guard "$agent" "$project"
   with_dirs_guard
   ensure_image
-  local project="$PWD" slug home
+  require_supported_engine_mounts
   home="$HOMES_DIR/$agent"
   mkdir -p "$home"
-  fix_home_ownership "$home"
-  fix_synced_write_ownership
 
   if ! sync_ready; then
     warn "sync is not set up (run 'satchel init') — session is sandboxed but nothing will sync"
   fi
   quiet_pull
   if sync_ready; then
+    validate_sync_state
     ensure_skill_library
     repair_skill_library 0
-    fix_synced_write_ownership
   fi
   prune_all_handoffs
   update_check
@@ -235,11 +275,24 @@ cmd_session() {
   materialize_mcp "$agent" "$home"
   # Probe the ssh-agent once, before anything reads SSH_STATE: the launch
   # warning and the memory-file preamble must describe the same agent.
+  # Install cleanup first so Ctrl-C during a passphrase prompt cannot leave a
+  # temporary agent behind.
+  trap 'stop_temporary_ssh_agent' EXIT
   ssh_preflight
+  local temporary_agent=0
+  if [ -n "$TEMP_SSH_AGENT_PID" ]; then
+    temporary_agent=1
+  else
+    trap - EXIT
+  fi
   # Written even without sync: the "where you are running" note must reach
   # the agent regardless; latest_handoff just finds nothing in that case.
   write_memory_file "$agent" "$home" "$slug" "$project"
 
+  # This is the final host-side write boundary before the agent starts.
+  # Root-run hosts may have just materialized config and memory as root.
+  fix_home_ownership "$home"
+  fix_synced_write_ownership
   compose_run_args "$agent" "$home" "$project"
   local tty=() ; [ -t 0 ] && tty=(-it)
   announce_session_mode
@@ -266,7 +319,7 @@ cmd_session() {
   local rc=0
   "$(engine)" run --rm "${tty[@]}" "${RUN_ARGS[@]}" "$IMAGE" "${launch[@]}" "$@" || rc=$?
 
-  # Reclaim now, before the handoff writer (sandboxed, running as the user)
+  # Normalize now, before the handoff writer (sandboxed, running as the user)
   # needs to read the transcripts the root session just wrote. Synced
   # read-write mounts get the same repair on every engine/session mode:
   # root-run hosts need it before safe sessions, and Docker Host Sessions can
@@ -298,5 +351,11 @@ cmd_session() {
     fi
   fi
   rm -f "$stamp"
+  # Keep the temporary agent through the host-side Sync Repo push, then tear
+  # it down. The handoff worker never receives its socket.
+  if [ "$temporary_agent" -eq 1 ]; then
+    stop_temporary_ssh_agent
+    trap - EXIT
+  fi
   return "$rc"
 }

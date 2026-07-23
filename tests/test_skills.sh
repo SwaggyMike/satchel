@@ -93,12 +93,12 @@ rm -rf -- "$SATCHEL_DIR/sync/skills/shared/stable"
 grep -q 'skills removed: stable' <(report_skill_changes 2>&1)
 
 # Ownership preparation targets only the two synced directories that agents
-# may edit, and requests quiet success reporting.
+# may edit. Successful preparation is always quiet.
 owned=()
-fix_home_ownership() { owned+=("$1:${2:-0}"); }
+fix_home_ownership() { owned+=("$1"); }
 fix_synced_write_ownership
-[ "${owned[0]}" = "$SATCHEL_DIR/sync/skills/shared:1" ]
-[ "${owned[1]}" = "$SATCHEL_DIR/sync/machines/testbox:1" ]
+[ "${owned[0]}" = "$SATCHEL_DIR/sync/skills/shared" ]
+[ "${owned[1]}" = "$SATCHEL_DIR/sync/machines/testbox" ]
 
 # Without a Sync Repo Satchel still identifies itself, but must not claim a
 # shared/persistent Skill Library exists.

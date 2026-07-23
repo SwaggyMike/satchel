@@ -30,6 +30,11 @@ became harder to find as startup context grew.
 - Handoff directories retain the latest ten files per project or machine.
   Older handoffs remain recoverable from Git history; the active tree is not
   an incident archive.
+- The unattended handoff writer receives only the persistent agent home needed
+  to resume the conversation. Its working directory exists only inside the
+  disposable container; projects, `/host`, SSH, clipboard, MCP tools, skills,
+  and synced machine state are unavailable. Satchel, not the model container,
+  writes the returned markdown into the Sync Repo.
 - Normal sandboxed launches are silent. Only exceptional or dangerous states,
   notably Host Sessions, produce a pre-launch warning; agent TUIs immediately
   replace routine banner output anyway.

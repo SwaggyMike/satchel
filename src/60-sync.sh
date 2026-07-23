@@ -1,10 +1,17 @@
 
 # ----------------------------------------------------------------- sync
 
+validate_sync_state() {
+  sync_ready || return 0
+  validate_machine_state
+  validate_mcp_state
+  validate_project_state
+}
+
 sync_machine_registration() { # sync_machine_registration <machine-name>
   local name="$1"
   ensure_sync_identity
-  validate_project_state
+  validate_sync_state
   git_sync add -A
   git_sync diff --cached --quiet || git_sync commit -q -m "add machine $name"
   # An existing clone may be behind another machine. Integrate first so a
@@ -29,7 +36,7 @@ cmd_sync() {
   ensure_skill_library
   repair_skill_library 1
   report_skill_changes
-  validate_project_state
+  validate_sync_state
   prune_all_handoffs
   git_sync add -A
   if ! git_sync diff --cached --quiet; then
@@ -67,7 +74,7 @@ sync_rollup_ok() { # sync_rollup_ok <message>
 quiet_push() { # quiet_push <message> — best-effort commit+push of the Sync Repo
   sync_ready || return 0
   ensure_sync_identity
-  validate_project_state
+  validate_sync_state
   git_sync add -A
   git_sync diff --cached --quiet && return 0
   if sync_rollup_ok "$1"; then

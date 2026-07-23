@@ -10,8 +10,8 @@ cmd_doctor() {
   out_header "satchel $SATCHEL_VERSION doctor — machine $MACHINE"
 
   local missing="" c
-  for c in git jq curl ssh; do command -v "$c" >/dev/null 2>&1 || missing="$missing $c"; done
-  if [ -z "$missing" ]; then d_ok "host tools: git, jq, curl, ssh"; else d_fail "missing host tools:$missing"; fi
+  for c in git jq curl ssh ssh-add ssh-agent; do command -v "$c" >/dev/null 2>&1 || missing="$missing $c"; done
+  if [ -z "$missing" ]; then d_ok "host tools: git, jq, curl, ssh, ssh-add, ssh-agent"; else d_fail "missing host tools:$missing"; fi
 
   local e=""
   if e="$(engine 2>/dev/null)" && "$e" info >/dev/null 2>&1; then
@@ -23,6 +23,11 @@ cmd_doctor() {
   if [ -n "$e" ] && "$e" image inspect "$IMAGE" >/dev/null 2>&1; then
     local av; av="$(image_agent_versions)"
     d_ok "image: built${av:+ ($av)}"
+    if engine_mount_probe; then
+      d_ok "bind mounts: engine can read Satchel's local state"
+    else
+      d_fail "bind mounts: engine cannot read Satchel's local state (unsupported nested-container setup?)"
+    fi
   else
     d_warn "image not built yet — builds on first session, or run 'satchel update'"
   fi
@@ -47,7 +52,7 @@ cmd_doctor() {
   for a in claude codex; do
     [ -d "$HOMES_DIR/$a" ] || continue
     if ! podman_rootless && [ -n "$(find "$HOMES_DIR/$a" ! -user "$SATCHEL_UID" -print -quit 2>/dev/null)" ]; then
-      d_warn "$a home has files not owned by uid $SATCHEL_UID (left by a Host Session?) — the next $a session reclaims them"
+      d_warn "$a home has internal files not owned by uid $SATCHEL_UID — the next $a session prepares them automatically"
     fi
   done
 

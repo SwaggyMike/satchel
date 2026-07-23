@@ -6,6 +6,19 @@ baseline_notes_file()     { printf '%s/notes.md' "$(machine_dir)"; }
 baseline_inventory_file() { printf '%s/inventory.md' "$(machine_dir)"; }
 baseline_skip_file()      { printf '%s/.baseline-skip' "$(machine_dir)"; }
 
+validate_machine_state() {
+  valid_machine_name "$MACHINE" || die "unsafe machine name '$MACHINE'"
+  [ -d "$SYNC_DIR/machines" ] || return 0
+  local entry name
+  while IFS= read -r -d '' entry; do
+    [ -d "$entry" ] && [ ! -L "$entry" ] \
+      || die "invalid machine entry: $entry"
+    name="$(basename "$entry")"
+    valid_machine_name "$name" \
+      || die "unsafe machine directory '$name' in the Sync Repo"
+  done < <(find -P "$SYNC_DIR/machines" -mindepth 1 -maxdepth 1 -print0)
+}
+
 warn_machine_notes_size() {
   local notes words
   notes="$(baseline_notes_file)"

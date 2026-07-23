@@ -132,6 +132,25 @@ resolve_candidate_handoffs() { # resolve candidate scopes after substantive work
   done <<< "$body"
 }
 
+compose_handoff_run_args() { # compose_handoff_run_args <agent> <home> <project>
+  local agent="$1" home="$2" project="$3"
+  # The handoff worker resumes the transcript and writes its answer to stdout.
+  # It does not need the project, Sync Repo, skills, machine notes, clipboard,
+  # SSH agent, or Host Session access. Keep its only durable mount read-write:
+  # both CLIs store the resumed conversation in their agent home.
+  RUN_ARGS=(--init --label "$MANAGED_CONTAINER_LABEL"
+    -e HOME=/home/satchel -e "TERM=${TERM:-xterm-256color}"
+    -e DISABLE_AUTOUPDATER=1
+    -v "$home:/home/satchel" -w "$project"
+    --user "$SATCHEL_UID:$SATCHEL_GID" --cap-drop ALL
+    --security-opt no-new-privileges)
+  if selinux_active; then RUN_ARGS+=(--security-opt label=disable); fi
+  if podman_rootless; then
+    RUN_ARGS+=(--userns=keep-id --passwd-entry '$USERNAME:*:$UID:$GID::/home/satchel:/bin/bash')
+  fi
+  return 0
+}
+
 generate_handoff() { # generate_handoff <agent> <slug> <project>  — runs after the session ends; empty slug = machine scope
   local agent="$1" slug="$2" project="$3"
   local now scope prompt
@@ -182,29 +201,23 @@ Start tracked notes with exactly '=== project: <id> ===', candidate notes with e
   local base_cmd model setting
   case "$agent" in
     claude)
-      base_cmd=(claude --continue --effort low -p "$prompt")
+      base_cmd=(claude --continue --strict-mcp-config --tools "" --effort low -p "$prompt")
       model="${SATCHEL_HANDOFF_MODEL_CLAUDE-haiku}"; setting=SATCHEL_HANDOFF_MODEL_CLAUDE ;;
     codex)
       # --skip-git-repo-check: codex exec hard-fails in a non-git project dir
       # (interactive codex remembers trust; exec does not).
       # Codex has no rolling cheap-model alias (any pinned name would rot),
       # so the speed lever is reasoning effort on the default model instead.
-      base_cmd=(codex exec resume --last --skip-git-repo-check -c 'sandbox_mode="danger-full-access"' -c 'model_reasoning_effort="low"' "$prompt")
+      base_cmd=(codex exec resume --last --skip-git-repo-check --ignore-user-config --ignore-rules -c 'sandbox_mode="danger-full-access"' -c 'model_reasoning_effort="low"' "$prompt")
       model="${SATCHEL_HANDOFF_MODEL_CODEX-}"; setting=SATCHEL_HANDOFF_MODEL_CODEX ;;
   esac
   local cmd=("${base_cmd[@]}")
   case "$agent:$model" in
-    claude:?*) cmd=(claude --continue --model "$model" --effort low -p "$prompt") ;;
-    codex:?*)  cmd=(codex exec resume --last --skip-git-repo-check -c 'sandbox_mode="danger-full-access"' -c 'model_reasoning_effort="low"' -m "$model" "$prompt") ;;
+    claude:?*) cmd=(claude --continue --strict-mcp-config --tools "" --model "$model" --effort low -p "$prompt") ;;
+    codex:?*)  cmd=(codex exec resume --last --skip-git-repo-check --ignore-user-config --ignore-rules -c 'sandbox_mode="danger-full-access"' -c 'model_reasoning_effort="low"' -m "$model" "$prompt") ;;
   esac
 
-  # The handoff writer never needs host powers: recompose the run args
-  # sandboxed, so a Host Session's handoff can't litter the agent home with
-  # root-owned files that break every later session.
-  local saved_host="$HOST_MODE"
-  HOST_MODE=0
-  compose_run_args "$agent" "$HOMES_DIR/$agent" "$project"
-  HOST_MODE="$saved_host"
+  compose_handoff_run_args "$agent" "$HOMES_DIR/$agent" "$project"
 
   info "writing handoff… (Ctrl-C skips it)"
   # Trap INT so Ctrl-C skips the handoff instead of killing satchel mid-script.

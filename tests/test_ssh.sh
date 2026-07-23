@@ -29,6 +29,21 @@ set_ssh_add_rc 0; [ "$(ssh_agent_state)" = ready ]
 set_ssh_add_rc 1; [ "$(ssh_agent_state)" = empty ]
 set_ssh_add_rc 2; [ "$(ssh_agent_state)" = dead ]
 
+# A temporary agent uses only a standard private key, exposes a socket, and is
+# removed cleanly at the session boundary. ssh-add is stubbed so no real key
+# material is needed for the lifecycle check.
+mkdir -p "$HOME/.ssh"
+touch "$HOME/.ssh/id_ed25519"
+set_ssh_add_rc 0
+start_temporary_ssh_agent
+[ "$SSH_STATE" = ready ]
+[ -S "$SSH_AUTH_SOCK" ]
+temp_sock="$SSH_AUTH_SOCK"
+stop_temporary_ssh_agent
+[ ! -e "$temp_sock" ]
+[ -z "$TEMP_SSH_AGENT_PID" ]
+rm "$HOME/.ssh/id_ed25519"
+
 # The socket is mounted only when an agent answers on it.
 SSH_STATE=ready ssh_forwarding
 SSH_STATE=empty ssh_forwarding
@@ -51,11 +66,16 @@ grep -q 'cannot authenticate' <(preamble dead)
 grep -q 'cannot authenticate' <(preamble none)
 grep -q 'cannot authenticate' <(preamble off)
 
-# Preflight warns on empty and dead, stays calm when ready or opted out.
-# stdin from /dev/null: non-interactive runs must warn, never prompt.
-mkdir -p "$HOME/.ssh"; touch "$HOME/.ssh/id_test.pub"
-grep -q 'ssh-add' <(SSH_STATE=empty ssh_preflight </dev/null 2>&1)
-grep -q 'no ssh-agent answered' <(SSH_STATE=dead ssh_preflight 2>&1)
+# Preflight automatically loads standard keys. If none is usable it explains
+# the impact before continuing; ready and opted-out sessions stay calm.
+set_ssh_add_rc 1
+grep -q 'git push over SSH will not work' <(SSH_STATE=empty ssh_preflight </dev/null 2>&1)
+start_temporary_ssh_agent() { SSH_STATE=ready; TEMP_SSH_AGENT_PID=123; return 0; }
+touch "$HOME/.ssh/id_ed25519"
+[ -z "$(SSH_STATE=none TEMP_SSH_AGENT_PID= ssh_preflight 2>&1)" ]
+rm "$HOME/.ssh/id_ed25519"
+start_temporary_ssh_agent() { return 1; }
+grep -q 'git push over SSH will not work' <(SSH_STATE=dead ssh_preflight </dev/null 2>&1)
 [ -z "$(SSH_STATE=ready ssh_preflight 2>&1)" ]
 [ -z "$(SSH_STATE=off ssh_preflight 2>&1)" ]
 

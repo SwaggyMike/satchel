@@ -113,6 +113,10 @@ need_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "'$1' is required but not installed"
 }
 
+valid_machine_name() {
+  [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]
+}
+
 # Where shims live — same priority as install.sh so 'satchel link' puts them
 # where the installer would have.
 shim_dir() {
@@ -246,6 +250,18 @@ remove_tree_for_uninstall() { # validated exact state tree only; sudo fallback
   sudo rm -rf -- "$path"
 }
 
+validate_state_removal_path() { # validate_state_removal_path <state> <install-dir>
+  local state="$1" install_dir="$2" home_real
+  home_real="$(readlink -f "$HOME")"
+  case "$state" in
+    /|"$home_real"|"$install_dir") die "refusing to remove unsafe state path $state" ;;
+  esac
+  if [ ! -f "$state/config" ] && [ ! -f "$state/install-path" ] \
+     && [ ! -d "$state/sync" ] && [ ! -d "$state/home" ]; then
+    die "$state does not look like a Satchel state directory — refusing to remove it"
+  fi
+}
+
 installed_satchel_path() { # true only for an installer-owned script location
   local self="$1" recorded="" self_dir candidate
   self_dir="$(dirname "$self")"
@@ -374,7 +390,7 @@ offer_uninstall_retirement() {
 }
 
 cmd_uninstall() {
-  local purge=0 yes=0 interactive=1 arg self install_dir state home_real p target agent ahead
+  local purge=0 yes=0 interactive=1 arg self install_dir state p target agent ahead
   local shim_root seen_key scope seen_shims=$'\n'
   for arg in "$@"; do
     case "$arg" in
@@ -390,7 +406,6 @@ cmd_uninstall() {
     || die "$self does not look like an installed Satchel command — refusing to remove a checkout or arbitrary script"
   install_dir="$(dirname "$self")"
   state="$(readlink -f "$SATCHEL_DIR")"
-  home_real="$(readlink -f "$HOME")"
 
   if [ "$yes" -eq 0 ] && [ "$purge" -eq 0 ]; then
     scope="$(choose_uninstall_scope "$state")"
@@ -402,13 +417,7 @@ cmd_uninstall() {
   fi
 
   if [ "$purge" -eq 1 ]; then
-    case "$state" in
-      /|"$home_real"|"$install_dir") die "refusing to purge unsafe state path $state" ;;
-    esac
-    if [ ! -f "$state/config" ] && [ ! -f "$state/install-path" ] \
-       && [ ! -d "$state/sync" ] && [ ! -d "$state/home" ]; then
-      die "$state does not look like a Satchel state directory — refusing to purge it"
-    fi
+    validate_state_removal_path "$state" "$install_dir"
     if [ -d "$state/sync/.git" ] && [ -n "$(git -C "$state/sync" status --porcelain 2>/dev/null)" ]; then
       warn "the local Sync Repo has uncommitted changes; --purge will delete them"
     fi
@@ -498,6 +507,8 @@ load_config() {
   # shellcheck disable=SC1090
   [ -f "$CONFIG_FILE" ] && . "$CONFIG_FILE"
   MACHINE="${MACHINE:-$(hostname -s)}"
+  valid_machine_name "$MACHINE" \
+    || die "unsafe machine name '$MACHINE' — use letters, numbers, dots, underscores, and hyphens, starting with a letter or number"
   local uid; uid="$(id -u)"
   # Never run agents as root inside the container; on root hosts (Unraid)
   # fall back to 1000:1000. Override with SATCHEL_UID/SATCHEL_GID in the config.
@@ -547,6 +558,74 @@ selinux_active() {
 # anything else = nothing answering) so launch messages and the session
 # preamble describe what git push will actually do.
 SSH_STATE=""
+TEMP_SSH_AGENT_PID=""
+TEMP_SSH_AGENT_DIR=""
+
+standard_private_keys() {
+  local key
+  for key in id_ed25519 id_ecdsa id_rsa; do
+    [ -f "$HOME/.ssh/$key" ] && printf '%s\n' "$HOME/.ssh/$key"
+  done
+}
+
+stop_temporary_ssh_agent() {
+  [ -n "$TEMP_SSH_AGENT_PID" ] || return 0
+  kill "$TEMP_SSH_AGENT_PID" 2>/dev/null || true
+  if [ -n "$TEMP_SSH_AGENT_DIR" ]; then
+    rm -f -- "$TEMP_SSH_AGENT_DIR/agent.sock"
+    rmdir -- "$TEMP_SSH_AGENT_DIR" 2>/dev/null || true
+  fi
+  TEMP_SSH_AGENT_PID=""
+  TEMP_SSH_AGENT_DIR=""
+  SSH_AUTH_SOCK=""
+  export SSH_AUTH_SOCK
+}
+
+start_temporary_ssh_agent() {
+  local out sock pid key
+  local keys=()
+  while IFS= read -r key; do keys+=("$key"); done < <(standard_private_keys)
+  [ ${#keys[@]} -gt 0 ] || return 1
+  TEMP_SSH_AGENT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/satchel-ssh-agent.XXXXXX")"
+  sock="$TEMP_SSH_AGENT_DIR/agent.sock"
+  out="$(ssh-agent -a "$sock" -s 2>/dev/null)" || {
+    rmdir -- "$TEMP_SSH_AGENT_DIR" 2>/dev/null || true
+    TEMP_SSH_AGENT_DIR=""
+    return 1
+  }
+  pid="$(printf '%s\n' "$out" | sed -n 's/^SSH_AGENT_PID=\([0-9][0-9]*\);.*/\1/p')"
+  if [ -z "$pid" ]; then
+    rmdir -- "$TEMP_SSH_AGENT_DIR" 2>/dev/null || true
+    TEMP_SSH_AGENT_DIR=""
+    return 1
+  fi
+  TEMP_SSH_AGENT_PID="$pid"
+  SSH_AUTH_SOCK="$sock"
+  export SSH_AUTH_SOCK
+  if ssh-add "${keys[@]}"; then
+    # Root-run hosts launch normal sessions as SATCHEL_UID. This socket belongs
+    # only to the current session, so grant that exact user access to it.
+    if [ "$(id -u)" -eq 0 ] && [ "$HOST_MODE" -eq 0 ]; then
+      if ! chown "$SATCHEL_UID:$SATCHEL_GID" "$TEMP_SSH_AGENT_DIR" "$sock"; then
+        stop_temporary_ssh_agent
+        return 1
+      fi
+    fi
+    SSH_STATE=ready
+    return 0
+  fi
+  stop_temporary_ssh_agent
+  return 1
+}
+
+pause_without_ssh() {
+  warn "$1"
+  if [ -t 0 ]; then
+    local reply
+    read -r -p "$(prompt_text "Press Enter to continue without SSH, or Ctrl-C to stop: ")" reply
+  fi
+}
+
 ssh_agent_state() {
   if [ "${SATCHEL_SSH:-1}" = 0 ]; then printf 'off'; return 0; fi
   if [ ! -S "${SSH_AUTH_SOCK:-}" ]; then printf 'none'; return 0; fi
@@ -573,21 +652,64 @@ ssh_forwarding() {
 # Session-start preflight: say up front what git-over-SSH will do, instead of
 # letting the first push inside the sandbox fail mysteriously.
 ssh_preflight() {
-  case "${SSH_STATE:=$(ssh_agent_state)}" in
+  local state="${SSH_STATE:=$(ssh_agent_state)}" key
+  local keys=()
+  while IFS= read -r key; do keys+=("$key"); done < <(standard_private_keys)
+
+  # A root-owned host socket cannot normally be reached by a normal UID-1000
+  # session. Prefer a temporary socket whose ownership Satchel controls.
+  if [ "$(id -u)" -eq 0 ] && [ "$HOST_MODE" -eq 0 ] && [ "$state" != off ]; then
+    state=none
+    SSH_STATE=none
+  fi
+
+  case "$state" in
     empty)
-      # Keys on disk but none in the agent: offer to load them now, while a
-      # passphrase prompt can still reach a human. The key file stays on the
-      # host either way; sessions only ever gain the ability to ask for
-      # signatures, and only while the key stays loaded.
-      if [ -t 0 ] && have_pubkey && confirm_yes "ssh-agent has no keys loaded - run 'ssh-add' now so this session can push over SSH?"; then
-        if ssh-add; then SSH_STATE=ready; return 0; fi
+      if [ ${#keys[@]} -gt 0 ] && ssh-add "${keys[@]}"; then
+        SSH_STATE=ready
+        return 0
       fi
-      warn "ssh-agent has no keys loaded (ssh-add -l) - git push over SSH will fail inside the session until you run 'ssh-add' (on the machine you connected from, if this is a remote shell); keys added later work without restarting"
+      pause_without_ssh "ssh-agent has no usable standard key — git push over SSH will not work in this session; load a key with ssh-add, or set SATCHEL_SSH=0 if SSH is not needed"
       ;;
-    dead)  warn "SSH_AUTH_SOCK is set but no ssh-agent answered - git over SSH will not work inside the session" ;;
-    none)  info "no ssh-agent on this host - git push over SSH will not work inside the session (SATCHEL_SSH=0 hides this note)" ;;
+    dead|none)
+      if [ ${#keys[@]} -gt 0 ] && start_temporary_ssh_agent; then
+        return 0
+      fi
+      SSH_STATE="$state"
+      pause_without_ssh "no usable ssh-agent or standard key — git push over SSH will not work in this session; start/load an agent, or set SATCHEL_SSH=0 if SSH is not needed"
+      ;;
   esac
   return 0
+}
+
+running_inside_container() {
+  [ -e /.dockerenv ] || [ -e /run/.containerenv ]
+}
+
+engine_mount_probe() {
+  local e probe rc=0
+  e="$(engine)"
+  mkdir -p "$SATCHEL_DIR" 2>/dev/null || return 1
+  probe="$(mktemp -d "$SATCHEL_DIR/.mount-probe.XXXXXX" 2>/dev/null)" || return 1
+  if ! printf 'satchel mount probe\n' > "$probe/marker"; then
+    rmdir -- "$probe" 2>/dev/null || true
+    return 1
+  fi
+  local label=()
+  if selinux_active; then label=(--security-opt label=disable); fi
+  "$e" run --rm --label "$MANAGED_CONTAINER_LABEL" "${label[@]}" \
+    -v "$probe:/probe:ro" "$IMAGE" test -f /probe/marker \
+    >/dev/null 2>&1 || rc=$?
+  case "$probe" in "$SATCHEL_DIR"/.mount-probe.*) rm -rf -- "$probe" ;; esac
+  return "$rc"
+}
+
+require_supported_engine_mounts() {
+  running_inside_container || return 0
+  engine_mount_probe && return 0
+  die "the container engine cannot see Satchel's local files.
+       Satchel is already running inside a container whose Docker/Podman daemon uses a different filesystem (common in Home Assistant apps).
+       This nested-container setup is not supported; run Satchel on the Linux host or use the appliance's native agent app."
 }
 
 slugify() { # project dir name → safe file name
@@ -975,6 +1097,26 @@ DOCKERFILE
 MCP_FILE="$SYNC_DIR/mcp.json"
 SYNC_TOKENS_FILE="$SYNC_DIR/mcp-tokens.env"
 
+mcp_name_valid() {
+  [[ "$1" =~ ^[A-Za-z0-9_-]+$ ]]
+}
+
+validate_mcp_state() {
+  [ -f "$MCP_FILE" ] || return 0
+  jq -e '
+    type == "object"
+    and (keys == ["servers"])
+    and (.servers | type == "object")
+    and all(.servers | to_entries[];
+      (.key | test("^[A-Za-z0-9_-]+$"))
+      and (.value | type == "object")
+      and ((.value | keys) == ["auth", "url"])
+      and (.value.url | type == "string" and length > 0)
+      and (.value.auth == "bearer" or .value.auth == "none"))
+  ' "$MCP_FILE" >/dev/null \
+    || die "invalid mcp.json — expected safely named servers with url and bearer/none auth fields"
+}
+
 token_for() { # token_for <name> → prints token or nothing (local overrides synced)
   local name="$1" line
   for f in "$LOCAL_TOKENS_FILE" "$SYNC_TOKENS_FILE"; do
@@ -1050,6 +1192,7 @@ compose_codex_mcp_env() { # appends to RUN_ARGS
 
 cmd_mcp() {
   sync_ready || die "sync is not set up — run 'satchel init' first"
+  validate_mcp_state
   local sub="${1:-list}"; shift || true
   case "$sub" in
     list)
@@ -1074,7 +1217,7 @@ cmd_mcp() {
         if ! confirm_yes "  does it need a bearer token?"; then auth="none"; fi
       fi
       [ "${3:-}" = "--no-auth" ] && auth="none"
-      printf '%s' "$name" | grep -Eq '^[a-zA-Z0-9_-]+$' || die "server name must be [a-zA-Z0-9_-]"
+      mcp_name_valid "$name" || die "server name must be [a-zA-Z0-9_-]"
       [ -f "$MCP_FILE" ] || printf '{ "servers": {} }\n' > "$MCP_FILE"
       jq --arg n "$name" --arg u "$url" --arg a "$auth" \
         '.servers[$n] = {url: $u, auth: $a}' "$MCP_FILE" > "$MCP_FILE.tmp"
@@ -1104,6 +1247,7 @@ cmd_mcp() {
           || die "not a valid choice: $choice"
         name="${names[$((choice - 1))]}"
       fi
+      mcp_name_valid "$name" || die "server name must be [a-zA-Z0-9_-]"
       [ -f "$MCP_FILE" ] && { jq --arg n "$name" 'del(.servers[$n])' "$MCP_FILE" > "$MCP_FILE.tmp"; mv "$MCP_FILE.tmp" "$MCP_FILE"; }
       for f in "$LOCAL_TOKENS_FILE" "$SYNC_TOKENS_FILE"; do
         [ -f "$f" ] && { grep -v "^${name}=" "$f" > "$f.tmp" || true; mv "$f.tmp" "$f"; chmod 600 "$f"; }
@@ -1141,6 +1285,7 @@ prompt_token() { # ADR 0002: offer synced (default) or local-only storage
 materialize_mcp() {
   local agent="$1" home="$2"
   [ -f "$MCP_FILE" ] || return 0
+  validate_mcp_state
   local servers="{}" block="" name url auth token
   while IFS=$'\t' read -r name url auth; do
     token="$(token_for "$name")"
@@ -1688,6 +1833,25 @@ resolve_candidate_handoffs() { # resolve candidate scopes after substantive work
   done <<< "$body"
 }
 
+compose_handoff_run_args() { # compose_handoff_run_args <agent> <home> <project>
+  local agent="$1" home="$2" project="$3"
+  # The handoff worker resumes the transcript and writes its answer to stdout.
+  # It does not need the project, Sync Repo, skills, machine notes, clipboard,
+  # SSH agent, or Host Session access. Keep its only durable mount read-write:
+  # both CLIs store the resumed conversation in their agent home.
+  RUN_ARGS=(--init --label "$MANAGED_CONTAINER_LABEL"
+    -e HOME=/home/satchel -e "TERM=${TERM:-xterm-256color}"
+    -e DISABLE_AUTOUPDATER=1
+    -v "$home:/home/satchel" -w "$project"
+    --user "$SATCHEL_UID:$SATCHEL_GID" --cap-drop ALL
+    --security-opt no-new-privileges)
+  if selinux_active; then RUN_ARGS+=(--security-opt label=disable); fi
+  if podman_rootless; then
+    RUN_ARGS+=(--userns=keep-id --passwd-entry '$USERNAME:*:$UID:$GID::/home/satchel:/bin/bash')
+  fi
+  return 0
+}
+
 generate_handoff() { # generate_handoff <agent> <slug> <project>  — runs after the session ends; empty slug = machine scope
   local agent="$1" slug="$2" project="$3"
   local now scope prompt
@@ -1738,29 +1902,23 @@ Start tracked notes with exactly '=== project: <id> ===', candidate notes with e
   local base_cmd model setting
   case "$agent" in
     claude)
-      base_cmd=(claude --continue --effort low -p "$prompt")
+      base_cmd=(claude --continue --strict-mcp-config --tools "" --effort low -p "$prompt")
       model="${SATCHEL_HANDOFF_MODEL_CLAUDE-haiku}"; setting=SATCHEL_HANDOFF_MODEL_CLAUDE ;;
     codex)
       # --skip-git-repo-check: codex exec hard-fails in a non-git project dir
       # (interactive codex remembers trust; exec does not).
       # Codex has no rolling cheap-model alias (any pinned name would rot),
       # so the speed lever is reasoning effort on the default model instead.
-      base_cmd=(codex exec resume --last --skip-git-repo-check -c 'sandbox_mode="danger-full-access"' -c 'model_reasoning_effort="low"' "$prompt")
+      base_cmd=(codex exec resume --last --skip-git-repo-check --ignore-user-config --ignore-rules -c 'sandbox_mode="danger-full-access"' -c 'model_reasoning_effort="low"' "$prompt")
       model="${SATCHEL_HANDOFF_MODEL_CODEX-}"; setting=SATCHEL_HANDOFF_MODEL_CODEX ;;
   esac
   local cmd=("${base_cmd[@]}")
   case "$agent:$model" in
-    claude:?*) cmd=(claude --continue --model "$model" --effort low -p "$prompt") ;;
-    codex:?*)  cmd=(codex exec resume --last --skip-git-repo-check -c 'sandbox_mode="danger-full-access"' -c 'model_reasoning_effort="low"' -m "$model" "$prompt") ;;
+    claude:?*) cmd=(claude --continue --strict-mcp-config --tools "" --model "$model" --effort low -p "$prompt") ;;
+    codex:?*)  cmd=(codex exec resume --last --skip-git-repo-check --ignore-user-config --ignore-rules -c 'sandbox_mode="danger-full-access"' -c 'model_reasoning_effort="low"' -m "$model" "$prompt") ;;
   esac
 
-  # The handoff writer never needs host powers: recompose the run args
-  # sandboxed, so a Host Session's handoff can't litter the agent home with
-  # root-owned files that break every later session.
-  local saved_host="$HOST_MODE"
-  HOST_MODE=0
-  compose_run_args "$agent" "$HOMES_DIR/$agent" "$project"
-  HOST_MODE="$saved_host"
+  compose_handoff_run_args "$agent" "$HOMES_DIR/$agent" "$project"
 
   info "writing handoff… (Ctrl-C skips it)"
   # Trap INT so Ctrl-C skips the handoff instead of killing satchel mid-script.
@@ -1835,10 +1993,17 @@ Start tracked notes with exactly '=== project: <id> ===', candidate notes with e
 
 # ----------------------------------------------------------------- sync
 
+validate_sync_state() {
+  sync_ready || return 0
+  validate_machine_state
+  validate_mcp_state
+  validate_project_state
+}
+
 sync_machine_registration() { # sync_machine_registration <machine-name>
   local name="$1"
   ensure_sync_identity
-  validate_project_state
+  validate_sync_state
   git_sync add -A
   git_sync diff --cached --quiet || git_sync commit -q -m "add machine $name"
   # An existing clone may be behind another machine. Integrate first so a
@@ -1863,7 +2028,7 @@ cmd_sync() {
   ensure_skill_library
   repair_skill_library 1
   report_skill_changes
-  validate_project_state
+  validate_sync_state
   prune_all_handoffs
   git_sync add -A
   if ! git_sync diff --cached --quiet; then
@@ -1901,7 +2066,7 @@ sync_rollup_ok() { # sync_rollup_ok <message>
 quiet_push() { # quiet_push <message> — best-effort commit+push of the Sync Repo
   sync_ready || return 0
   ensure_sync_identity
-  validate_project_state
+  validate_sync_state
   git_sync add -A
   git_sync diff --cached --quiet && return 0
   if sync_rollup_ok "$1"; then
@@ -1950,6 +2115,19 @@ machine_dir()             { printf '%s/machines/%s' "$SYNC_DIR" "$MACHINE"; }
 baseline_notes_file()     { printf '%s/notes.md' "$(machine_dir)"; }
 baseline_inventory_file() { printf '%s/inventory.md' "$(machine_dir)"; }
 baseline_skip_file()      { printf '%s/.baseline-skip' "$(machine_dir)"; }
+
+validate_machine_state() {
+  valid_machine_name "$MACHINE" || die "unsafe machine name '$MACHINE'"
+  [ -d "$SYNC_DIR/machines" ] || return 0
+  local entry name
+  while IFS= read -r -d '' entry; do
+    [ -d "$entry" ] && [ ! -L "$entry" ] \
+      || die "invalid machine entry: $entry"
+    name="$(basename "$entry")"
+    valid_machine_name "$name" \
+      || die "unsafe machine directory '$name' in the Sync Repo"
+  done < <(find -P "$SYNC_DIR/machines" -mindepth 1 -maxdepth 1 -print0)
+}
 
 warn_machine_notes_size() {
   local notes words
@@ -2279,32 +2457,48 @@ compose_run_args() { # compose_run_args <agent> <home> <project>
   return 0
 }
 
-# A Host Session runs as root in the container, and on docker that leaves
-# root-owned files in the agent home — which breaks every later session on
-# this machine (config writes fail with permission errors). Reclaim them with
-# a one-off root container; rootless podman maps container root back to the
-# user, so there is never anything to heal there.
-fix_home_ownership() { # fix_home_ownership <path> [quiet]
+# A Host Session runs as root in the container, and a root-run host creates
+# files as root before a normal UID-1000 session. Normalize only Satchel's
+# documented writable state. Success is routine and silent; failures explain
+# the exact internal path without implying that project or host files changed.
+ownership_path_allowed() {
+  local target state claude_home codex_home skills machine
+  [ -e "$1" ] && [ ! -L "$1" ] || return 1
+  target="$(readlink -f "$1")"
+  state="$(readlink -f "$SATCHEL_DIR")"
+  claude_home="$state/home/claude"
+  codex_home="$state/home/codex"
+  skills="$state/sync/skills/shared"
+  machine="$state/sync/machines/$MACHINE"
+  case "$target" in
+    "$claude_home"|"$codex_home"|"$skills"|"$machine") return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+fix_home_ownership() { # fix_home_ownership <Satchel-managed-path>
+  ownership_path_allowed "$1" \
+    || die "refusing ownership repair outside Satchel-managed writable state: $1"
   podman_rootless && return 0
-  local count quiet="${2:-0}"
+  local count
   count="$(find "$1" ! -user "$SATCHEL_UID" -printf . 2>/dev/null | wc -c)"
   [ "$count" -gt 0 ] || return 0
   local label=()
   if selinux_active; then label=(--security-opt label=disable); fi
   if "$(engine)" run --rm --label "$MANAGED_CONTAINER_LABEL" --user 0:0 \
-      "${label[@]}" -v "$1:/reclaim" "$IMAGE" \
-      chown -R "$SATCHEL_UID:$SATCHEL_GID" /reclaim; then
-    [ "$quiet" -eq 1 ] || info "restored ownership of $count items in $1 to $SATCHEL_UID:$SATCHEL_GID"
+      "${label[@]}" -v "$1:/satchel-data" "$IMAGE" \
+      chown -R "$SATCHEL_UID:$SATCHEL_GID" /satchel-data; then
+    :
   else
-    warn "could not restore ownership in $1 — sessions may hit permission errors"
+    warn "could not prepare Satchel's internal data at $1 for the normal session user"
   fi
 }
 
 fix_synced_write_ownership() {
   sync_ready || return 0
   mkdir -p "$SYNC_DIR/skills/shared" "$SYNC_DIR/machines/$MACHINE"
-  fix_home_ownership "$SYNC_DIR/skills/shared" 1
-  fix_home_ownership "$SYNC_DIR/machines/$MACHINE" 1
+  fix_home_ownership "$SYNC_DIR/skills/shared"
+  fix_home_ownership "$SYNC_DIR/machines/$MACHINE"
 }
 
 # The sandbox promise is "the container sees only the project directory" —
@@ -2312,10 +2506,23 @@ fix_synced_write_ownership() {
 # logins) or an ancestor of it. Host Sessions mount / on purpose, so no guard.
 session_mount_guard() {
   [ "$HOST_MODE" -eq 1 ] && return 0
-  [ "$UNSAFE_HOME" -eq 1 ] && return 0
-  local bad=0 where="your home directory"
-  [ "$PWD" = "/" ] && { bad=1; where="/"; }
-  case "$HOME" in "$PWD"|"$PWD"/*) bad=1 ;; esac
+  local project home state bad=0 where="your home directory"
+  project="$(readlink -f "${2:-$PWD}" 2>/dev/null)" \
+    || die "could not resolve session directory ${2:-$PWD}"
+  home="$(readlink -f "$HOME")"
+  state="$(readlink -f "$SATCHEL_DIR" 2>/dev/null || printf '%s' "$SATCHEL_DIR")"
+  if [ "$project" = "/" ]; then
+    bad=1; where="/"
+  else
+    case "$home" in "$project"|"$project"/*) bad=1; where="your home directory" ;; esac
+    if [ "$bad" -eq 0 ]; then
+      case "$state" in "$project"|"$project"/*) bad=1; where="Satchel's private state directory" ;; esac
+      case "$project" in "$state"|"$state"/*) bad=1; where="Satchel's private state directory" ;; esac
+    fi
+  fi
+  if [ "$UNSAFE_HOME" -eq 1 ] && [ "$where" != "Satchel's private state directory" ]; then
+    return 0
+  fi
   [ "$bad" -eq 1 ] || return 0
   # A sandboxed session here would mount everything that matters (SSH keys,
   # MCP tokens, logins) while still claiming to be a sandbox. Offer the
@@ -2328,6 +2535,9 @@ session_mount_guard() {
     info "cd into a project directory, or run 'satchel --unsafe-home $1' for a sandboxed session here"
     exit 1
   fi
+  if [ "$where" = "Satchel's private state directory" ]; then
+    die "refusing to mount Satchel's private state directory into a session"
+  fi
   die "refusing to start a session in $PWD — that would mount your entire home directory (SSH keys, MCP tokens, logins) read-write into the sandbox.
        cd into a project directory, or run 'satchel --unsafe-home $1' if you really mean it."
 }
@@ -2337,13 +2547,21 @@ session_mount_guard() {
 # or /, no matter the flags. Paths are normalized so the mount, the
 # preamble, and the in-session paths all agree.
 with_dirs_guard() {
-  local i w
+  local i w home state
+  home="$(readlink -f "$HOME")"
+  state="$(readlink -f "$SATCHEL_DIR" 2>/dev/null || printf '%s' "$SATCHEL_DIR")"
   for i in "${!WITH_DIRS[@]}"; do
     w="$(readlink -f "${WITH_DIRS[$i]}" 2>/dev/null)" || w=""
     [ -n "$w" ] && [ -d "$w" ] || die "--with ${WITH_DIRS[$i]}: not a directory"
     [ "$w" = / ] && die "--with ${WITH_DIRS[$i]}: refusing to mount /"
-    case "$(readlink -f "$HOME")" in
+    case "$home" in
       "$w"|"$w"/*) die "--with $w: refusing to mount your home directory (SSH keys, MCP tokens, logins)" ;;
+    esac
+    case "$state" in
+      "$w"|"$w"/*) die "--with $w: refusing to mount Satchel's private state directory" ;;
+    esac
+    case "$w" in
+      "$state"|"$state"/*) die "--with $w: refusing to mount Satchel's private state directory" ;;
     esac
     WITH_DIRS[$i]="$w"
   done
@@ -2368,23 +2586,23 @@ cmd_session() {
   done
   set -- "${args[@]}"
   need_cmd git; need_cmd jq
-  session_mount_guard "$agent"
+  local project slug home
+  project="$(readlink -f "$PWD" 2>/dev/null)" || die "could not resolve session directory $PWD"
+  session_mount_guard "$agent" "$project"
   with_dirs_guard
   ensure_image
-  local project="$PWD" slug home
+  require_supported_engine_mounts
   home="$HOMES_DIR/$agent"
   mkdir -p "$home"
-  fix_home_ownership "$home"
-  fix_synced_write_ownership
 
   if ! sync_ready; then
     warn "sync is not set up (run 'satchel init') — session is sandboxed but nothing will sync"
   fi
   quiet_pull
   if sync_ready; then
+    validate_sync_state
     ensure_skill_library
     repair_skill_library 0
-    fix_synced_write_ownership
   fi
   prune_all_handoffs
   update_check
@@ -2405,11 +2623,24 @@ cmd_session() {
   materialize_mcp "$agent" "$home"
   # Probe the ssh-agent once, before anything reads SSH_STATE: the launch
   # warning and the memory-file preamble must describe the same agent.
+  # Install cleanup first so Ctrl-C during a passphrase prompt cannot leave a
+  # temporary agent behind.
+  trap 'stop_temporary_ssh_agent' EXIT
   ssh_preflight
+  local temporary_agent=0
+  if [ -n "$TEMP_SSH_AGENT_PID" ]; then
+    temporary_agent=1
+  else
+    trap - EXIT
+  fi
   # Written even without sync: the "where you are running" note must reach
   # the agent regardless; latest_handoff just finds nothing in that case.
   write_memory_file "$agent" "$home" "$slug" "$project"
 
+  # This is the final host-side write boundary before the agent starts.
+  # Root-run hosts may have just materialized config and memory as root.
+  fix_home_ownership "$home"
+  fix_synced_write_ownership
   compose_run_args "$agent" "$home" "$project"
   local tty=() ; [ -t 0 ] && tty=(-it)
   announce_session_mode
@@ -2436,7 +2667,7 @@ cmd_session() {
   local rc=0
   "$(engine)" run --rm "${tty[@]}" "${RUN_ARGS[@]}" "$IMAGE" "${launch[@]}" "$@" || rc=$?
 
-  # Reclaim now, before the handoff writer (sandboxed, running as the user)
+  # Normalize now, before the handoff writer (sandboxed, running as the user)
   # needs to read the transcripts the root session just wrote. Synced
   # read-write mounts get the same repair on every engine/session mode:
   # root-run hosts need it before safe sessions, and Docker Host Sessions can
@@ -2468,6 +2699,12 @@ cmd_session() {
     fi
   fi
   rm -f "$stamp"
+  # Keep the temporary agent through the host-side Sync Repo push, then tear
+  # it down. The handoff worker never receives its socket.
+  if [ "$temporary_agent" -eq 1 ]; then
+    stop_temporary_ssh_agent
+    trap - EXIT
+  fi
   return "$rc"
 }
 
@@ -2535,6 +2772,8 @@ cmd_init() {
   sync_ready && was_initialized=1
   read -r -p "$(prompt_text "machine name [$MACHINE]: ")" name
   name="$(slugify "${name:-$MACHINE}")"
+  valid_machine_name "$name" \
+    || die "machine name must start with a letter or number and contain only letters, numbers, dots, underscores, and hyphens"
   read -r -p "$(prompt_text "sync repo URL (private git repo; empty to skip sync for now)${SYNC_URL:+ [$SYNC_URL]}: ")" url
   url="${url:-$SYNC_URL}"
 
@@ -2717,6 +2956,7 @@ rollback_retirement() { # rollback_retirement <pre-retirement-head> <machine>
 
 retire_machine_from_caravan() { # retire_machine_from_caravan <machine> [strict]
   local target="$1" strict="${2:-0}" before
+  valid_machine_name "$target" || die "invalid or unsafe machine name '$target'"
   ensure_sync_identity
 
   if [ "$strict" -eq 1 ]; then
@@ -2756,6 +2996,7 @@ retire_machine_from_caravan() { # retire_machine_from_caravan <machine> [strict]
 cmd_retire() {
   sync_ready || die "sync is not set up — run 'satchel init' first"
   quiet_pull
+  validate_sync_state
   local target="${1:-}"
   if [ -z "$target" ]; then
     local names=() m marker i
@@ -2777,6 +3018,7 @@ cmd_retire() {
       || die "not a valid choice: $choice"
     target="${names[$((choice - 1))]}"
   fi
+  valid_machine_name "$target" || die "invalid or unsafe machine name '$target'"
   [ -d "$SYNC_DIR/machines/$target" ] || die "no machine '$target' in the caravan"
 
   confirm "retire '$target' — delete its folder from the Sync Repo? (git history keeps it)" || { info "cancelled"; return 0; }
@@ -2785,7 +3027,11 @@ cmd_retire() {
   if [ "$target" = "$MACHINE" ]; then
     warn "that was this machine — its local state ($SATCHEL_DIR) still exists: config, agent logins, the sync clone"
     if confirm "delete the local state too? (agent logins in sessions will be lost)"; then
-      rm -rf "$SATCHEL_DIR"
+      local state install_dir
+      state="$(readlink -f "$SATCHEL_DIR")"
+      install_dir="$(dirname "$(readlink -f "$0")")"
+      validate_state_removal_path "$state" "$install_dir"
+      remove_tree_for_uninstall "$state"
       info "removed $SATCHEL_DIR — this machine is fully retired"
     fi
   fi
@@ -2819,7 +3065,7 @@ cmd_status() {
   if ! sync_ready; then
     printf '  sync: not set up (run satchel init)\n'
   else
-    validate_project_state
+    validate_sync_state
     printf '  sync: %s\n' "$SYNC_URL"
     printf '  last sync commit: %s\n' "$(git_sync log -1 --format='%h %s (%cr)' 2>/dev/null || echo none)"
     local bv; bv="$(baseline_marker_version)"
@@ -2906,8 +3152,8 @@ cmd_doctor() {
   out_header "satchel $SATCHEL_VERSION doctor — machine $MACHINE"
 
   local missing="" c
-  for c in git jq curl ssh; do command -v "$c" >/dev/null 2>&1 || missing="$missing $c"; done
-  if [ -z "$missing" ]; then d_ok "host tools: git, jq, curl, ssh"; else d_fail "missing host tools:$missing"; fi
+  for c in git jq curl ssh ssh-add ssh-agent; do command -v "$c" >/dev/null 2>&1 || missing="$missing $c"; done
+  if [ -z "$missing" ]; then d_ok "host tools: git, jq, curl, ssh, ssh-add, ssh-agent"; else d_fail "missing host tools:$missing"; fi
 
   local e=""
   if e="$(engine 2>/dev/null)" && "$e" info >/dev/null 2>&1; then
@@ -2919,6 +3165,11 @@ cmd_doctor() {
   if [ -n "$e" ] && "$e" image inspect "$IMAGE" >/dev/null 2>&1; then
     local av; av="$(image_agent_versions)"
     d_ok "image: built${av:+ ($av)}"
+    if engine_mount_probe; then
+      d_ok "bind mounts: engine can read Satchel's local state"
+    else
+      d_fail "bind mounts: engine cannot read Satchel's local state (unsupported nested-container setup?)"
+    fi
   else
     d_warn "image not built yet — builds on first session, or run 'satchel update'"
   fi
@@ -2943,7 +3194,7 @@ cmd_doctor() {
   for a in claude codex; do
     [ -d "$HOMES_DIR/$a" ] || continue
     if ! podman_rootless && [ -n "$(find "$HOMES_DIR/$a" ! -user "$SATCHEL_UID" -print -quit 2>/dev/null)" ]; then
-      d_warn "$a home has files not owned by uid $SATCHEL_UID (left by a Host Session?) — the next $a session reclaims them"
+      d_warn "$a home has internal files not owned by uid $SATCHEL_UID — the next $a session prepares them automatically"
     fi
   done
 

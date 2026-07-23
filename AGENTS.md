@@ -52,6 +52,12 @@ temporary `HOME` and `SATCHEL_DIR`.
 - Validate synced state before committing it. A failed network operation must
   leave a retryable local state rather than losing the user's work.
 - Ownership repair must target only the documented writable mounts.
+- Ownership preparation is an internal compatibility step: keep its allowlist
+  exact, keep successful runs silent, and never describe it as changing project
+  or host files.
+- Unattended helper containers get only the mounts required for their task.
+  In particular, the handoff writer may access the agent conversation home but
+  not projects, `/host`, SSH, clipboard, MCP tools, skills, or machine state.
 - `repositories.json` is the sole authority for canonical Git origins and
   tracked/ignored decisions. Project directories contain only handoffs, and
   machine Project caches contain only `path → Project ID`.

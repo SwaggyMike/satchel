@@ -28,7 +28,9 @@ Two of its premises expired:
 - The Skill Library and current Machine Knowledge directory are the only
   Sync Repo paths mounted read-write. Satchel repairs ownership of those exact
   paths before and after sessions so root-run hosts and Host Sessions cannot
-  make later sandboxed sessions unable to write.
+  make later sandboxed sessions unable to write. Agent homes receive the same
+  treatment. The allowlist is exact, successful preparation is silent, and
+  project or arbitrary host paths are never ownership-rewritten.
 - Agent-native skill discovery occurs at startup. Installation is durable immediately, but a fresh session is the boundary at which the newly installed skill can be assumed to appear automatically.
 - A skill that misbehaves on one agent is handled inside the skill (frontmatter like `disable-model-invocation`), not by library placement. Codex ignores skill metadata it can't use per-skill; it does not fail the library.
 

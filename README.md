@@ -28,9 +28,13 @@ The container sees only the project directory, runs as a non-root user, and
 is deleted when the session ends — and the agent is told exactly that, so it
 answers "that file is outside the sandbox" instead of pretending your
 machine's files don't exist (in a Host Session it knows the machine lives
-at `/host`). The host's ssh-agent is forwarded in as a socket, so `git push`
-works in-session while key files never enter the container (the
-`SATCHEL_SSH` setting turns it off — see ADR 0005). On a graphical host the
+at `/host`). Satchel forwards a usable host ssh-agent socket so `git push`
+works in-session while key files never enter the container. If no usable
+agent exists but a standard host key (`id_ed25519`, `id_ecdsa`, or `id_rsa`)
+does, Satchel starts a temporary agent for that session and asks `ssh-add` to
+load it; passphrase-protected keys prompt on the host. Otherwise Satchel
+explains that SSH pushes will fail and pauses before launch. The
+`SATCHEL_SSH` setting turns this off (see ADR 0005). On a graphical host the
 compositor socket is forwarded the same way, so pasting an image from the
 clipboard works (`SATCHEL_CLIPBOARD` turns it off — see ADR 0007). Log in once (or `satchel import claude` to
 copy the host's login); every session after that starts authenticated. After
@@ -55,8 +59,10 @@ untrack [id]` to ignore it globally and remove its active Project handoffs.
 
 Working across repos that influence each other? `satchel claude --with
 ../other-repo` mounts the extra directory alongside the project (repeat the
-flag for more); home directories and / are refused as extras, same as the
-primary mount. You can also just launch from a parent directory that holds
+flag for more); home directories, `/`, and Satchel's private state are
+refused as extras, same as the primary mount. Paths are resolved before
+checking, so a symlink cannot bypass the boundary. You can also just launch
+from a parent directory that holds
 several repos. Satchel recursively discovers repositories only inside those
 explicit mount roots, both before and after the session, so newly cloned repos
 and checkouts never opened on that host are classified by origin. Either way,
@@ -68,6 +74,11 @@ demand instead of loading them all up front. Nested work belongs to the nearest
 enclosing repo; multiple checkouts with the same origin share one Project.
 Each handoff directory keeps the latest ten files; older versions remain
 recoverable through Sync Repo history.
+
+The automatic handoff writer resumes the agent conversation with only that
+agent's local conversation home mounted. It cannot read the project, `/host`,
+SSH agent, clipboard, MCP tools, shared skills, or machine state; Satchel
+itself files the returned note afterward.
 
 Each machine has a small, always-loaded `notes.md` for enduring operational
 facts and machine-wide risks, a dated `inventory.md` read only when system
@@ -158,7 +169,7 @@ status` reports any locally quarantined attempts that still need attention.
 | `satchel import claude\|codex` | copy the host's agent login into satchel's sessions |
 | `satchel mcp add\|list\|remove` | manage the MCP Registry (configured once, wired into every session) |
 | `satchel settings` | show every setting and its value; `satchel settings <KEY> <value>` sets it caravan-wide, `--local` for one machine |
-| `satchel doctor` | check this machine's setup end to end — engine, image, key, sync, MCP endpoints |
+| `satchel doctor` | check this machine's setup end to end — including a real bind-mount probe, key, sync, and MCP endpoints |
 | `satchel image` | build the shared agent image if it is missing |
 | `satchel update` | self-update from `main` (lists the commits it pulls in) and rebuild the agent image |
 | `satchel uninstall` | remove Satchel and choose whether to preserve or purge local state |
@@ -183,6 +194,19 @@ machine's folder from the upstream Sync Repo; it leaves Projects, shared
 state, other machines, and the repository itself untouched. Declining simply
 continues uninstall, while a failed retirement stops before local removal.
 Non-interactive `--yes` never retires a machine.
+
+On root-run hosts and after Host Sessions, Satchel may need to make its own
+agent homes, shared skills, and current-machine state writable by the normal
+session UID. This preparation is silent when successful and is restricted to
+those exact internal paths; it never changes project files or arbitrary host
+paths.
+
+Running Satchel inside another application container is supported only when
+its Docker/Podman daemon can bind-mount Satchel's actual local files. Satchel
+probes this directly and stops with a clear unsupported nested-container
+message instead of continuing into repeated mount errors. Home Assistant
+add-ons should generally use their native agent app, or run Satchel on the
+underlying Linux host.
 
 ## What syncs, what doesn't
 
