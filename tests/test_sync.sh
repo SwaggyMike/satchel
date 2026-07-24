@@ -25,44 +25,25 @@ git_sync add -A && git_sync commit -q -m init && git_sync push -qu origin main
 count() { git_sync rev-list --count HEAD; }
 origin_head() { git -C "$tmp/origin.git" rev-parse main; }
 
-# First session commit: nothing to roll into.
+# Every completed session is one ordinary, recoverable Git commit.
 touch "$SYNC_DIR/one"; quiet_push "session: sample on testbox"
 [ "$(count)" = 2 ]
-
-# Second session within the hour, same marker: folded into the previous
-# commit, and the force-push kept origin in step.
 touch "$SYNC_DIR/two"; quiet_push "session: sample on testbox"
-[ "$(count)" = 2 ]
+[ "$(count)" = 3 ]
 [ "$(origin_head)" = "$(git_sync rev-parse HEAD)" ]
 grep -q two <(git_sync show --stat --format= HEAD)
 
-# A different marker never rolls up.
+# Commit subjects do not affect that behavior.
 touch "$SYNC_DIR/three"; quiet_push "session: other on testbox"
-[ "$(count)" = 3 ]
-
-# An old marker never rolls up: age out the last commit and re-sync origin.
-git_sync commit -q --amend --no-edit --date "2 hours ago"
-git_sync push -qf origin main
-touch "$SYNC_DIR/four"; quiet_push "session: other on testbox"
 [ "$(count)" = 4 ]
 
-# Non-session commits never roll up, even back to back.
+# Non-session changes use the same plain commit path.
+touch "$SYNC_DIR/four"; quiet_push "add machine testbox"
 touch "$SYNC_DIR/five"; quiet_push "add machine testbox"
-touch "$SYNC_DIR/six"; quiet_push "add machine testbox"
 [ "$(count)" = 6 ]
 
-# Divergence: another machine pushed since our last sync. The amend must be
-# abandoned and the session land as a plain commit on top of theirs.
-touch "$SYNC_DIR/seven"; quiet_push "session: roll on testbox"
 other="$tmp/other"
 git clone -q "$tmp/origin.git" "$other"
-git -C "$other" -c user.name=o -c user.email=o@o commit -q --allow-empty -m "session: sample on elsewhere"
-git -C "$other" push -q origin main
-touch "$SYNC_DIR/eight"; quiet_push "session: roll on testbox"   # same subject, fresh: tries to amend
-grep -q elsewhere <(git_sync log --oneline)
-grep -q eight <(git_sync show --stat --format= HEAD)
-! grep -q seven <(git_sync show --stat --format= HEAD)
-[ "$(origin_head)" = "$(git_sync rev-parse HEAD)" ]
 
 # An interrupted launch can leave a legitimate machine path-cache change
 # uncommitted. The next quiet pull preserves it while integrating remote work.
@@ -74,6 +55,33 @@ quiet_pull
 grep -q 'remote before dirty pull' <(git_sync log --oneline)
 grep -q '^local cache$' "$SYNC_DIR/local-dirty"
 [ -n "$(git_sync status --porcelain -- local-dirty)" ]
+
+# Offline startup remains best-effort, but a real rebase conflict must stop
+# startup instead of leaving Satchel to operate in a half-rebased Sync Repo.
+rm "$SYNC_DIR/local-dirty"
+printf 'base\n' > "$SYNC_DIR/conflict"
+git_sync add conflict
+git_sync commit -q -m "conflict base"
+git_sync push -q
+git -C "$other" pull -q --rebase
+printf 'local\n' > "$SYNC_DIR/conflict"
+git_sync commit -qam "local conflict"
+printf 'remote\n' > "$other/conflict"
+git -C "$other" -c user.name=o -c user.email=o@o commit -qam "remote conflict"
+git -C "$other" push -q
+rc=0
+quiet_pull >/dev/null 2>&1 || rc=$?
+[ "$rc" -ne 0 ]
+sync_needs_recovery
+[ -n "$(git_sync diff --name-only --diff-filter=U)" ]
+git_sync rebase --abort
+git_sync reset -q --hard origin/main
+! sync_needs_recovery
+
+# A clean repository with an unavailable remote still starts from local state.
+timeout() { return 1; }
+quiet_pull >/dev/null 2>&1
+unset -f timeout
 
 # A user interrupt is not an offline pull. It must stop session startup rather
 # than print a warning and continue through later initialization.
@@ -95,4 +103,20 @@ grep -q "remote before re-init" <(git_sync log --oneline)
 grep -q nine <(git_sync show --stat --format= HEAD)
 [ "$(origin_head)" = "$(git_sync rev-parse HEAD)" ]
 
-printf 'ok: sync commit rollup\n'
+# A conflict during session-finalization stops before push and clearly leaves
+# the new handoff commit recoverable in the local Sync Repo.
+printf 'base\n' > "$SYNC_DIR/finalize-conflict"
+quiet_push "finalize conflict base"
+git -C "$other" pull -q --rebase
+printf 'local\n' > "$SYNC_DIR/finalize-conflict"
+printf 'remote\n' > "$other/finalize-conflict"
+git -C "$other" -c user.name=o -c user.email=o@o commit -qam "remote finalize conflict"
+git -C "$other" push -q
+push_output="$(quiet_push "session: finalize conflict" 2>&1)"
+sync_needs_recovery
+grep -q 'committed locally' <<< "$push_output"
+git_sync rebase --abort
+grep -q '^local$' "$SYNC_DIR/finalize-conflict"
+[ "$(git_sync log -1 --format=%s)" = "session: finalize conflict" ]
+
+printf 'ok: sync commits and recovery\n'
