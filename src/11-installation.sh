@@ -88,6 +88,7 @@ cmd_link() {
   if [ "$linked" -eq 1 ]; then
     info "if a linked command still resolves to an old path, run 'hash -r' or open a new shell"
   fi
+  sync_unraid_boot_block
 }
 
 cmd_unlink() {
@@ -112,7 +113,16 @@ cmd_unlink() {
     fi
     rm -f "$shim"
     info "unlinked '$agent' (removed $shim)"
+    # Unraid's boot script recreates /usr/local/bin links from flash; drop the
+    # stale one now so an unlinked shim does not come back after a reboot. Only
+    # a link back into the shim just removed, and never fatally: an unwritable
+    # /usr/local/bin is somebody else's business.
+    if [ -L "/usr/local/bin/$agent" ] \
+       && [ "$(readlink -f "/usr/local/bin/$agent" 2>/dev/null || true)" = "$(readlink -f "$shim" 2>/dev/null || printf '%s' "$shim")" ]; then
+      rm -f "/usr/local/bin/$agent" 2>/dev/null || true
+    fi
   done
+  sync_unraid_boot_block
 }
 
 remove_file_for_uninstall() { # exact file/symlink only; sudo fallback
@@ -155,6 +165,49 @@ installed_satchel_path() { # true only for an installer-owned script location
     && [ "$(readlink -f "$self_dir/.satchel")" = "$(readlink -f "$SATCHEL_DIR")" ] \
     && { [ -f "$self_dir/.satchel/script-sha" ] \
          || grep -qs '^MACHINE=' "$self_dir/.satchel/config"; }
+}
+
+# Unraid restores /usr/local/bin and /root/.ssh from /boot/config/go at every
+# boot, and the block install.sh writes bakes in whichever shims existed then.
+# Rewriting it on link/unlink keeps a later-added shim from vanishing at the
+# next reboot, and stops an unlinked one from being recreated as a dangling
+# symlink forever.
+unraid_boot_block_body() { # unraid_boot_block_body <satchel-path> <shim>...
+  local self="$1"; shift
+  printf 'ln -sf %s' "$self"
+  local s; for s in "$@"; do printf ' %s' "$s"; done
+  printf ' /usr/local/bin/\n'
+  printf 'mkdir -p /root/.ssh && chmod 700 /root/.ssh\n'
+  printf 'cp /boot/config/ssh/root/id_ed25519* /root/.ssh/ 2>/dev/null && chmod 600 /root/.ssh/id_ed25519\n'
+  printf 'cp /boot/config/ssh/root/known_hosts /root/.ssh/ 2>/dev/null\n'
+}
+
+sync_unraid_boot_block() {
+  local go=/boot/config/go begin='# >>> satchel boot persistence >>>'
+  local end='# <<< satchel boot persistence <<<' tmp self bin agent shims=()
+  [ -f /etc/unraid-version ] && [ -f "$go" ] || return 0
+  grep -qsF "$begin" "$go" || return 0
+  grep -qsF "$end" "$go" || { warn "the Satchel block in $go has no closing marker — leaving it untouched"; return 0; }
+  self="$(readlink -f "$0")"
+  bin="$(shim_dir)"
+  for agent in claude codex; do
+    shim_owned_by_install "$bin/$agent" "$agent" "$self" && shims+=("$bin/$agent")
+  done
+  tmp="$(mktemp)"
+  {
+    awk -v begin="$begin" -v end="$end" '
+      $0 == begin { skip=1; next } $0 == end { skip=0; next } !skip { print }' "$go"
+    printf '%s\n' "$begin"
+    unraid_boot_block_body "$self" ${shims[@]+"${shims[@]}"}
+    printf '%s\n' "$end"
+  } > "$tmp"
+  if cp -- "$tmp" "$go" 2>/dev/null; then
+    info "refreshed Satchel boot persistence in $go"
+  else
+    warn "could not update Satchel's boot-persistence block in $go"
+  fi
+  rm -f "$tmp"
+  return 0
 }
 
 remove_unraid_boot_block() {

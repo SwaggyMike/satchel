@@ -30,7 +30,11 @@ cmd_image() {
 }
 
 build_image() {
-  local e ctx; e="$(engine)"
+  local e ctx old_id=""; e="$(engine)"
+  # Remember the outgoing image so the superseded one can be reclaimed. Unraid
+  # keeps images in a fixed-size vdisk, and '--pull' plus two npm globals means
+  # every rebuild otherwise strands ~2GB of dangling layers.
+  old_id="$("$e" image inspect -f '{{.Id}}' "$IMAGE" 2>/dev/null || true)"
   ctx="$(mktemp -d)"
   # The whole environment agents run in. Agent CLIs are baked in; logins,
   # transcripts, and skills live in mounts, so rebuilding is always safe.
@@ -53,5 +57,30 @@ RUN sed -Ei 's#^((root|node):[^:]*:[^:]*:[^:]*:[^:]*:)[^:]*:#\1/home/satchel:#' 
 WORKDIR /home/satchel
 DOCKERFILE
   rm -rf "$ctx"
+  local new_id; new_id="$("$e" image inspect -f '{{.Id}}' "$IMAGE" 2>/dev/null || true)"
+  if [ -n "$old_id" ] && [ -n "$new_id" ] && [ "$old_id" != "$new_id" ]; then
+    # Only an untagged leftover: never remove an image someone else still names.
+    if [ -z "$("$e" image inspect -f '{{join .RepoTags ","}}' "$old_id" 2>/dev/null || true)" ]; then
+      "$e" image rm "$old_id" >/dev/null 2>&1 \
+        && info "reclaimed the superseded image ${old_id#sha256:}" || true
+    fi
+  fi
+  record_image_agents
   info "image built: $IMAGE"
+}
+
+# Agent versions come from inside the image, so asking costs a container start.
+# Cache the answer at build time: every session wants to publish it, and none
+# of them should pay for it.
+record_image_agents() {
+  local av; av="$(image_agent_versions)"
+  [ -n "$av" ] || return 0
+  mkdir -p "$SATCHEL_DIR"
+  printf '%s\n' "$av" > "$IMAGE_AGENTS_FILE"
+  return 0
+}
+
+cached_image_agents() {
+  [ -f "$IMAGE_AGENTS_FILE" ] || return 0
+  tr -d '\n' < "$IMAGE_AGENTS_FILE"
 }

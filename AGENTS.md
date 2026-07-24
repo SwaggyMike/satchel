@@ -51,6 +51,12 @@ temporary `HOME` and `SATCHEL_DIR`.
   including Codex `.system` skills, remains local.
 - Validate synced state before committing it. A failed network operation must
   leave a retryable local state rather than losing the user's work.
+- No Sync Repo condition may stop a Session from starting. Session paths
+  degrade syncing and continue; only explicit repo commands (`sync`, `status`)
+  fail loudly. Never leave the clone mid-rebase for the user to untangle.
+- Validate the fields Satchel reads and ignore unknown ones. Exact-key
+  validation of synced state turns one machine's upgrade into a caravan-wide
+  outage (ADR 0012).
 - Ownership repair must target only the documented writable mounts.
 - Ownership preparation is an internal compatibility step: keep its allowlist
   exact, keep successful runs silent, and never describe it as changing project
@@ -111,6 +117,7 @@ Subsystem mapping:
 - MCP registry and materialization: `tests/test_mcp.sh`
 - terminal output: `tests/test_output.sh`
 - project identity and handoffs: `tests/test_projects.sh`
+- reporting commands on a degraded host: `tests/test_reporting.sh`
 - shared skills: `tests/test_skills.sh`
 - SSH forwarding: `tests/test_ssh.sh`
 - Sync Repo Git behavior: `tests/test_sync.sh`

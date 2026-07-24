@@ -33,17 +33,26 @@ cmd_update() {
   sha="$(curl -fsSL "https://api.github.com/repos/$SATCHEL_REPO/commits/main" 2>/dev/null | jq -r '.sha // empty')" || sha=""
   ref="${sha:-main}"
   [ -z "$sha" ] && warn "could not resolve latest commit via the GitHub API — falling back to 'main' (may be up to ~5 min stale)"
-  tmp="$(mktemp)"
+  # Stage the download beside the installed command so the replacement is a
+  # same-filesystem rename. A cross-device 'mv' copies into the existing inode
+  # instead, and Bash — which reads a script incrementally and seeks back into
+  # the file between top-level commands — then resumes at the old offset inside
+  # the new, longer file and executes a fragment of it. That is the normal
+  # layout on Unraid, where /tmp is tmpfs and Satchel lives on the array.
+  tmp="$(mktemp "$(dirname "$self")/.satchel-update.XXXXXX")" \
+    || tmp="$(mktemp)"
+  trap 'rm -f -- "$tmp"' EXIT
   curl -fsSL "https://raw.githubusercontent.com/$SATCHEL_REPO/$ref/satchel" -o "$tmp" || die "download failed"
   bash -n "$tmp" || die "downloaded script does not parse — not installing it"
   [ -f "$SCRIPT_SHA_FILE" ] && old="$(cat "$SCRIPT_SHA_FILE")"
   if cmp -s "$tmp" "$self"; then
-    rm -f "$tmp"
+    rm -f "$tmp"; trap - EXIT
     info "satchel script already up to date (${sha:0:7})"
   else
     print_update_log "$old" "$sha"
     chmod 755 "$tmp"
     mv "$tmp" "$self" 2>/dev/null || { need_cmd sudo; sudo mv "$tmp" "$self"; }
+    trap - EXIT
     info "satchel updated to commit ${sha:0:7} ($self)"
   fi
   # The new artifact must own the rebuild: this process still has the previous

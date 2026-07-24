@@ -23,6 +23,7 @@ cmd_doctor() {
   if [ -n "$e" ] && "$e" image inspect "$IMAGE" >/dev/null 2>&1; then
     local av; av="$(image_agent_versions)"
     d_ok "image: built${av:+ ($av)}"
+    [ -z "$av" ] || printf '%s\n' "$av" > "$IMAGE_AGENTS_FILE"
     if engine_mount_probe; then
       d_ok "bind mounts: engine can read Satchel's local state"
     else
@@ -81,6 +82,46 @@ cmd_doctor() {
     else
       d_warn "no upstream yet — the first 'satchel sync' sets it"
     fi
+  fi
+
+  # Cross-machine drift: each machine builds its own image from floating tags,
+  # so identical Satchel versions can still run different agents. Name it here
+  # rather than letting it surface as "it works on the other box".
+  if sync_ready; then
+    local m mv mc ma mine skew=0
+    mine="$(cached_image_agents)"
+    while IFS=$'\t' read -r m mv mc ma; do
+      [ -n "$m" ] && [ "$m" != "$MACHINE" ] || continue
+      if [ "$mv" != "$SATCHEL_VERSION" ]; then
+        d_warn "caravan: $m runs satchel $mv, this machine runs $SATCHEL_VERSION — 'satchel update' on the older one"
+        skew=1
+      elif [ -n "$mine" ] && [ -n "$ma" ] && [ "$ma" != "$mine" ]; then
+        d_warn "caravan: $m has [$ma], this machine has [$mine] — 'satchel update' to converge"
+        skew=1
+      fi
+    done < <(caravan_environments)
+    [ "$skew" -eq 1 ] || d_ok "caravan: no version drift detected"
+  fi
+
+  # Unraid rebuilds / and /root from flash at every boot, so anything Satchel
+  # needs there has to exist on flash too.
+  if [ -f /etc/unraid-version ]; then
+    if [ -d /boot/config ]; then
+      if compgen -G '/boot/config/ssh/root/id_*' >/dev/null; then
+        d_ok "unraid: sync SSH key is backed up to flash"
+      elif [ -n "$(standard_private_keys)" ]; then
+        d_warn "unraid: the SSH key in \$HOME/.ssh is not on flash and will vanish at reboot — run 'satchel key --persist'"
+      fi
+      if grep -qsF '# >>> satchel boot persistence >>>' /boot/config/go; then
+        d_ok "unraid: boot persistence block present in /boot/config/go"
+      else
+        d_warn "unraid: no boot-persistence block in /boot/config/go — shims and key will not survive a reboot"
+      fi
+    fi
+    case "$(readlink -f "$SATCHEL_DIR")" in
+      /mnt/*) d_ok "unraid: state directory is on persistent storage" ;;
+      *) d_fail "unraid: state directory $SATCHEL_DIR is not under /mnt — it is wiped at every reboot" ;;
+    esac
   fi
 
   if [ -f "$MCP_FILE" ]; then

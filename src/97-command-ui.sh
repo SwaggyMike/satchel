@@ -26,7 +26,8 @@ caravan
   satchel status [--ignored]   caravan roster, projects, handoffs, MCP, skills
   satchel skills [list]        list active user-installed skills
   satchel skills remove [name] remove a skill caravan-wide (bare: numbered picker)
-  satchel key                  show this machine's SSH public key (makes one if needed)
+  satchel key [--persist]      show this machine's SSH public key (makes one if needed);
+                             --persist copies an existing key to Unraid flash
   satchel retire [machine]     remove a machine from the caravan (picks from a list)
   satchel doctor               check this machine's whole setup and say what's wrong
 

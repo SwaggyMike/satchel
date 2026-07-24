@@ -133,13 +133,26 @@ have added is:
 ln -sf /mnt/user/appdata/satchel/satchel /mnt/user/appdata/satchel/claude /usr/local/bin/
 mkdir -p /root/.ssh && chmod 700 /root/.ssh
 cp /boot/config/ssh/root/id_ed25519* /root/.ssh/ 2>/dev/null && chmod 600 /root/.ssh/id_ed25519
+cp /boot/config/ssh/root/known_hosts /root/.ssh/ 2>/dev/null
 # <<< satchel boot persistence <<<
 ```
 
 (Only shims the installer actually created are linked — an existing non-satchel
 `codex` in `/usr/local/bin` is never clobbered. And the flash drive is
 unencrypted FAT — fine for a key scoped to your private sync repo; use your
-judgment.)
+judgment.) `satchel link` and `satchel unlink` rewrite this block, so a shim
+added later survives the next reboot and an unlinked one stays gone. If the
+machine already had an SSH key when Satchel was installed, `satchel key
+--persist` copies it to flash — only keys Satchel generated itself were backed
+up automatically.
+
+Because Unraid runs as root while sandboxed sessions run as uid 1000, a project
+whose files are owned by root is readable but not writable inside the session,
+and Git refuses to operate on it at all. Satchel declares the mounted
+directories trusted for Git and tells you at launch if the agent will not be
+able to write, with the exact `chown` to fix it. `satchel doctor` also checks
+that your state directory is really on persistent storage and that the boot
+block and flash key copy exist.
 
 ## Skill Library
 
@@ -190,7 +203,7 @@ status` reports any locally quarantined attempts that still need attention.
 | `satchel status [--ignored]` | caravan roster, Project IDs/origins, ignored count or list, handoffs, MCP servers, skills |
 | `satchel skills [list]` | list active user-installed skills |
 | `satchel skills remove [name]` | remove a skill caravan-wide — numbered picker without a name |
-| `satchel key` | show this machine's SSH public key (generates one if needed) |
+| `satchel key [--persist]` | show this machine's SSH public key (generates one if needed); `--persist` copies an existing key to Unraid flash |
 | `satchel retire [machine]` | remove a machine from the caravan — interactive picker without a name |
 | `satchel import claude\|codex` | copy the host's agent login into satchel's sessions |
 | `satchel mcp add\|list\|remove` | manage the MCP Registry (configured once, wired into every session) |
@@ -233,6 +246,33 @@ probes this directly and stops with a clear unsupported nested-container
 message instead of continuing into repeated mount errors. Home Assistant
 add-ons should generally use their native agent app, or run Satchel on the
 underlying Linux host.
+
+## When syncing goes wrong
+
+The Sync Repo is bookkeeping; the session is the point. Nothing that happens to
+it can stop an agent from starting.
+
+Two machines changing different entries in the same shared file between syncs
+is the ordinary case, so Satchel merges those itself: `repositories.json`,
+`mcp.json`, `settings.env`, and `mcp-tokens.env` are union-merged, keeping every
+entry from both sides and letting the local machine win a genuine tie. You see
+one line saying it happened.
+
+A conflict in something Satchel does not own — a skill, a handoff — is yours to
+resolve, but the clone is never left mid-rebase waiting for you. Satchel puts it
+back to a clean state, keeps your local commit, says so every session, and
+carries on. `satchel doctor` shows what is still unreconciled.
+
+If the synced state is unreadable for any other reason, the session still runs;
+only syncing stops for that run, and Satchel says why. Registry files are
+validated on the fields Satchel actually reads, so a newer Satchel on one
+machine can add a field without breaking the older machines
+([ADR 0012](docs/adr/0012-sync-failures-never-block-a-session.md)).
+
+Because each machine builds its own container image from upstream's floating
+tags, two machines can legitimately run different agent versions. Each machine
+publishes what it has, and `satchel doctor` names the difference instead of
+leaving you to discover it as "it works on the other box".
 
 ## What syncs, what doesn't
 

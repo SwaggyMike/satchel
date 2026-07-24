@@ -27,6 +27,7 @@ LOCAL_TOKENS_FILE="$SATCHEL_DIR/mcp-tokens.local.env"
 SCRIPT_SHA_FILE="$SATCHEL_DIR/script-sha"
 INSTALL_PATH_FILE="$SATCHEL_DIR/install-path"
 SKILL_QUARANTINE_DIR="$SATCHEL_DIR/quarantine/skills"
+IMAGE_AGENTS_FILE="$SATCHEL_DIR/image-agents"
 IMAGE="localhost/satchel:latest"
 MANAGED_CONTAINER_LABEL="io.github.swaggymike.satchel.managed=true"
 
@@ -43,6 +44,10 @@ BASELINE_VERSION=2
 MACHINE_NOTES_WORD_LIMIT=750
 HANDOFF_RETENTION=10
 SYNC_BLOCK_REASON=""
+# Set when the Sync Repo is broken beyond automatic repair. Sessions still run;
+# only syncing stops. See degrade_sync.
+SYNC_DEGRADED=0
+SESSION_STAMP=""
 BASELINE_LAUNCH_OUTCOME="continue"
 BASELINE_LAUNCH_STATUS=0
 
@@ -211,6 +216,7 @@ cmd_link() {
   if [ "$linked" -eq 1 ]; then
     info "if a linked command still resolves to an old path, run 'hash -r' or open a new shell"
   fi
+  sync_unraid_boot_block
 }
 
 cmd_unlink() {
@@ -235,7 +241,16 @@ cmd_unlink() {
     fi
     rm -f "$shim"
     info "unlinked '$agent' (removed $shim)"
+    # Unraid's boot script recreates /usr/local/bin links from flash; drop the
+    # stale one now so an unlinked shim does not come back after a reboot. Only
+    # a link back into the shim just removed, and never fatally: an unwritable
+    # /usr/local/bin is somebody else's business.
+    if [ -L "/usr/local/bin/$agent" ] \
+       && [ "$(readlink -f "/usr/local/bin/$agent" 2>/dev/null || true)" = "$(readlink -f "$shim" 2>/dev/null || printf '%s' "$shim")" ]; then
+      rm -f "/usr/local/bin/$agent" 2>/dev/null || true
+    fi
   done
+  sync_unraid_boot_block
 }
 
 remove_file_for_uninstall() { # exact file/symlink only; sudo fallback
@@ -278,6 +293,49 @@ installed_satchel_path() { # true only for an installer-owned script location
     && [ "$(readlink -f "$self_dir/.satchel")" = "$(readlink -f "$SATCHEL_DIR")" ] \
     && { [ -f "$self_dir/.satchel/script-sha" ] \
          || grep -qs '^MACHINE=' "$self_dir/.satchel/config"; }
+}
+
+# Unraid restores /usr/local/bin and /root/.ssh from /boot/config/go at every
+# boot, and the block install.sh writes bakes in whichever shims existed then.
+# Rewriting it on link/unlink keeps a later-added shim from vanishing at the
+# next reboot, and stops an unlinked one from being recreated as a dangling
+# symlink forever.
+unraid_boot_block_body() { # unraid_boot_block_body <satchel-path> <shim>...
+  local self="$1"; shift
+  printf 'ln -sf %s' "$self"
+  local s; for s in "$@"; do printf ' %s' "$s"; done
+  printf ' /usr/local/bin/\n'
+  printf 'mkdir -p /root/.ssh && chmod 700 /root/.ssh\n'
+  printf 'cp /boot/config/ssh/root/id_ed25519* /root/.ssh/ 2>/dev/null && chmod 600 /root/.ssh/id_ed25519\n'
+  printf 'cp /boot/config/ssh/root/known_hosts /root/.ssh/ 2>/dev/null\n'
+}
+
+sync_unraid_boot_block() {
+  local go=/boot/config/go begin='# >>> satchel boot persistence >>>'
+  local end='# <<< satchel boot persistence <<<' tmp self bin agent shims=()
+  [ -f /etc/unraid-version ] && [ -f "$go" ] || return 0
+  grep -qsF "$begin" "$go" || return 0
+  grep -qsF "$end" "$go" || { warn "the Satchel block in $go has no closing marker — leaving it untouched"; return 0; }
+  self="$(readlink -f "$0")"
+  bin="$(shim_dir)"
+  for agent in claude codex; do
+    shim_owned_by_install "$bin/$agent" "$agent" "$self" && shims+=("$bin/$agent")
+  done
+  tmp="$(mktemp)"
+  {
+    awk -v begin="$begin" -v end="$end" '
+      $0 == begin { skip=1; next } $0 == end { skip=0; next } !skip { print }' "$go"
+    printf '%s\n' "$begin"
+    unraid_boot_block_body "$self" ${shims[@]+"${shims[@]}"}
+    printf '%s\n' "$end"
+  } > "$tmp"
+  if cp -- "$tmp" "$go" 2>/dev/null; then
+    info "refreshed Satchel boot persistence in $go"
+  else
+    warn "could not update Satchel's boot-persistence block in $go"
+  fi
+  rm -f "$tmp"
+  return 0
 }
 
 remove_unraid_boot_block() {
@@ -519,17 +577,45 @@ load_config() {
     else SATCHEL_UID="$uid"; SATCHEL_GID="$(id -g)"; fi
   fi
   SATCHEL_GID="${SATCHEL_GID:-$SATCHEL_UID}"
+  # Satchel's own git runs unattended with stderr suppressed under a timeout,
+  # so an interactive host-key prompt reads as "the remote is unreachable"
+  # after a 20-second stall. That happens on every boot of a host that rebuilds
+  # /root (Unraid), where known_hosts is gone. Accept-new records the key once.
+  export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o StrictHostKeyChecking=accept-new}"
 }
 
-sync_ready() { [ -n "$SYNC_URL" ] && [ -d "$SYNC_DIR/.git" ]; }
+# A degraded Sync Repo must never stop an agent from running: every mount,
+# read, and push is already guarded by sync_ready, so turning this one
+# predicate off cleanly disables syncing for the rest of the run.
+sync_ready() {
+  [ "$SYNC_DEGRADED" -eq 0 ] || return 1
+  [ -n "$SYNC_URL" ] && [ -d "$SYNC_DIR/.git" ]
+}
+
+degrade_sync() { # degrade_sync <reason> — stop syncing this run; the session continues
+  [ "$SYNC_DEGRADED" -eq 0 ] || return 0
+  SYNC_DEGRADED=1
+  SYNC_BLOCK_REASON="$1"
+  warn "Sync Repo unusable: $1"
+  warn "this session runs normally, but nothing will sync — run 'satchel doctor' to see why"
+  return 0
+}
+
+# Engine detection has two callers with different needs: a session must fail
+# loudly without an engine, while reporting commands (status, settings) must
+# still print everything else. Keep detection total and let select_engine own
+# the failure, so a missing engine can never abort a read-only command.
+detect_engine() { # prints docker|podman, or nothing; never exits
+  if [ -n "${SATCHEL_ENGINE:-}" ]; then printf '%s' "$SATCHEL_ENGINE"
+  elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then printf 'docker'
+  elif command -v podman >/dev/null 2>&1; then printf 'podman'
+  fi
+}
 
 select_engine() {
   [ -z "$ENGINE" ] || return 0
-  if [ -n "${SATCHEL_ENGINE:-}" ]; then ENGINE="$SATCHEL_ENGINE"
-  elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then ENGINE=docker
-  elif command -v podman >/dev/null 2>&1; then ENGINE=podman
-  else die "neither docker nor podman is available"
-  fi
+  ENGINE="$(detect_engine)"
+  [ -n "$ENGINE" ] || die "neither docker nor podman is available"
 }
 
 engine() {
@@ -661,16 +747,25 @@ ssh_forwarding() {
 
 # Session-start preflight: say up front what git-over-SSH will do, instead of
 # letting the first push inside the sandbox fail mysteriously.
-ssh_preflight() {
+ssh_preflight() { # ssh_preflight [agent] — agent only sharpens the guidance
+  local agent="${1:-claude}"
   local state="${SSH_STATE:=$(ssh_agent_state)}" key rc=0
   local keys=()
   while IFS= read -r key; do keys+=("$key"); done < <(standard_private_keys)
 
   # A root-owned host socket cannot normally be reached by a normal UID-1000
   # session. Prefer a temporary socket whose ownership Satchel controls.
+  local shared_agent_refused=0
   if [ "$(id -u)" -eq 0 ] && [ "$HOST_MODE" -eq 0 ] && [ "$state" != off ]; then
+    case "$state" in ready|empty) shared_agent_refused=1 ;; esac
     state=none
     SSH_STATE=none
+  fi
+  # Say why a working agent was set aside. Otherwise the fallback message below
+  # claims there is no agent at all, which contradicts what the user can see.
+  if [ "$shared_agent_refused" -eq 1 ] && [ ${#keys[@]} -eq 0 ]; then
+    warn "this host's ssh-agent belongs to root and cannot be shared with a uid-$SATCHEL_UID session"
+    warn "save a standard key at \$HOME/.ssh/id_ed25519 for Satchel to load, or use 'satchel --host $agent' when you need root's agent"
   fi
 
   case "$state" in
@@ -824,16 +919,17 @@ validate_project_state() {
   local registry project_dir id origin f
   registry="$(repository_registry_file)"
 
+  # Validate what Satchel reads, and ignore keys it does not know: a newer
+  # Satchel on another machine must be able to add a field without bricking
+  # every older machine in the caravan on its next command.
   jq -e '
     type == "object"
     and all(to_entries[];
       (.key | type == "string" and length > 0)
       and (.value | type == "object")
       and if .value.status == "tracked" then
-        ((.value | keys) == ["project", "status"])
-        and (.value.project | type == "string" and length > 0)
-      elif .value.status == "ignored" then
-        ((.value | keys) == ["status"])
+        (.value.project | type == "string" and length > 0)
+      elif .value.status == "ignored" then true
       else false end)
     and (([to_entries[] | select(.value.status == "tracked") | .value.project] | length)
       == ([to_entries[] | select(.value.status == "tracked") | .value.project] | unique | length))
@@ -868,7 +964,6 @@ validate_project_state() {
       and all(.paths | to_entries[];
         (.key | type == "string" and startswith("/"))
         and (.value | type == "object")
-        and ((.value | keys) == ["project"])
         and (.value.project | type == "string" and length > 0))
     ' "$f" >/dev/null || die "invalid machine Project cache: $f"
     while IFS= read -r id; do
@@ -928,6 +1023,7 @@ path_overlaps_roots() {
 
 refresh_project_paths() { # discover/match repositories inside the explicit session roots
   local launch="$1" roots=() root path id identity actual f
+  sync_ready || return 0
   ensure_project_registry; ensure_repository_registry
   validate_project_state
   [ "$HOST_MODE" -eq 0 ] || return 0
@@ -1092,7 +1188,11 @@ cmd_image() {
 }
 
 build_image() {
-  local e ctx; e="$(engine)"
+  local e ctx old_id=""; e="$(engine)"
+  # Remember the outgoing image so the superseded one can be reclaimed. Unraid
+  # keeps images in a fixed-size vdisk, and '--pull' plus two npm globals means
+  # every rebuild otherwise strands ~2GB of dangling layers.
+  old_id="$("$e" image inspect -f '{{.Id}}' "$IMAGE" 2>/dev/null || true)"
   ctx="$(mktemp -d)"
   # The whole environment agents run in. Agent CLIs are baked in; logins,
   # transcripts, and skills live in mounts, so rebuilding is always safe.
@@ -1115,7 +1215,32 @@ RUN sed -Ei 's#^((root|node):[^:]*:[^:]*:[^:]*:[^:]*:)[^:]*:#\1/home/satchel:#' 
 WORKDIR /home/satchel
 DOCKERFILE
   rm -rf "$ctx"
+  local new_id; new_id="$("$e" image inspect -f '{{.Id}}' "$IMAGE" 2>/dev/null || true)"
+  if [ -n "$old_id" ] && [ -n "$new_id" ] && [ "$old_id" != "$new_id" ]; then
+    # Only an untagged leftover: never remove an image someone else still names.
+    if [ -z "$("$e" image inspect -f '{{join .RepoTags ","}}' "$old_id" 2>/dev/null || true)" ]; then
+      "$e" image rm "$old_id" >/dev/null 2>&1 \
+        && info "reclaimed the superseded image ${old_id#sha256:}" || true
+    fi
+  fi
+  record_image_agents
   info "image built: $IMAGE"
+}
+
+# Agent versions come from inside the image, so asking costs a container start.
+# Cache the answer at build time: every session wants to publish it, and none
+# of them should pay for it.
+record_image_agents() {
+  local av; av="$(image_agent_versions)"
+  [ -n "$av" ] || return 0
+  mkdir -p "$SATCHEL_DIR"
+  printf '%s\n' "$av" > "$IMAGE_AGENTS_FILE"
+  return 0
+}
+
+cached_image_agents() {
+  [ -f "$IMAGE_AGENTS_FILE" ] || return 0
+  tr -d '\n' < "$IMAGE_AGENTS_FILE"
 }
 
 # ------------------------------------------------------------ mcp registry
@@ -1136,14 +1261,15 @@ mcp_url_valid() {
 
 validate_mcp_state() {
   [ -f "$MCP_FILE" ] || return 0
+  # Required fields are checked; unknown ones are ignored so a newer Satchel
+  # elsewhere in the caravan cannot brick this machine (see validate_project_state).
   jq -e '
     type == "object"
-    and (keys == ["servers"])
+    and has("servers")
     and (.servers | type == "object")
     and all(.servers | to_entries[];
       (.key | test("^[A-Za-z0-9_-]+$"))
       and (.value | type == "object")
-      and ((.value | keys) == ["auth", "url"])
       and (.value.url | type == "string"
         and length > 0
         and (explode | all(. >= 32 and . != 34 and . != 92 and . != 127)))
@@ -2042,13 +2168,27 @@ resolve_candidate_handoffs() { # resolve candidate scopes after substantive work
   done <<< "$body"
 }
 
+# Cancelling or timing out the handoff writer kills the engine CLI, but --rm is
+# handled daemon-side: without a known name the container keeps running (and
+# keeps spending tokens) after Satchel has moved on. Name it so it can be
+# removed for real.
+HANDOFF_CONTAINER_NAME=""
+
+remove_handoff_container() {
+  [ -n "$HANDOFF_CONTAINER_NAME" ] || return 0
+  "$(engine)" rm -f "$HANDOFF_CONTAINER_NAME" >/dev/null 2>&1 || true
+  return 0
+}
+
 compose_handoff_run_args() { # compose_handoff_run_args <agent> <home> <project>
   local agent="$1" home="$2" project="$3"
+  HANDOFF_CONTAINER_NAME="satchel-handoff-$$"
   # The handoff worker resumes the transcript and writes its answer to stdout.
   # It does not need the project, Sync Repo, skills, machine notes, clipboard,
   # SSH agent, or Host Session access. Keep its only durable mount read-write:
   # both CLIs store the resumed conversation in their agent home.
   RUN_ARGS=(--init --label "$MANAGED_CONTAINER_LABEL"
+    --name "$HANDOFF_CONTAINER_NAME"
     -e HOME=/home/satchel -e "TERM=${TERM:-xterm-256color}"
     -e DISABLE_AUTOUPDATER=1
     -v "$home:/home/satchel"
@@ -2106,9 +2246,12 @@ run_isolated_task() { # protect <command...> | cancellable <stdout-file> <stderr
     rc=131
   fi
   [ "$had_monitor" -eq 1 ] || set +m
-  trap - INT QUIT
-  [ -z "$old_int" ] || eval "$old_int"
-  [ -z "$old_quit" ] || eval "$old_quit"
+  # Restore each handler directly rather than clearing first. 'trap - INT'
+  # drops INT to its default for the instant before the caller's own handler is
+  # reinstalled, and a held Ctrl-C that lands in that window kills Satchel
+  # mid-cleanup — losing the handoff this function exists to protect.
+  if [ -n "$old_int" ];  then eval "$old_int";  else trap - INT;  fi
+  if [ -n "$old_quit" ]; then eval "$old_quit"; else trap - QUIT; fi
   return "$rc"
 }
 
@@ -2191,6 +2334,9 @@ Start tracked notes with exactly '=== project: <id> ===', candidate notes with e
   bodyf="$(mktemp)"
   run_isolated_task cancellable "$bodyf" "$errf" \
     timeout 240 "$(engine)" run --rm "${RUN_ARGS[@]}" "$IMAGE" "${cmd[@]}" || rc=$?
+  # A skipped or timed-out writer leaves the container behind; killing the CLI
+  # does not stop it. Reclaim the name before any retry reuses it.
+  [ "$rc" -eq 0 ] || remove_handoff_container
   body="$(<"$bodyf")"
   if [ "$rc" -eq 131 ]; then
     rm -f "$errf" "$bodyf"
@@ -2213,6 +2359,7 @@ Start tracked notes with exactly '=== project: <id> ===', candidate notes with e
       rc=0
       run_isolated_task cancellable "$bodyf" "$errf" \
         timeout 240 "$(engine)" run --rm "${RUN_ARGS[@]}" "$IMAGE" "${base_cmd[@]}" || rc=$?
+      [ "$rc" -eq 0 ] || remove_handoff_container
       body="$(<"$bodyf")"
       if [ "$rc" -eq 131 ]; then
         rm -f "$errf" "$bodyf"
@@ -2263,6 +2410,19 @@ validate_sync_state() {
   validate_project_state
 }
 
+# Session path: invalid synced state must never stop an agent from starting.
+# The strict validators die on purpose (they are right for 'satchel sync' and
+# 'satchel status'), so run them in a subshell and turn a fatal exit into a
+# degraded, still-usable session.
+validate_sync_state_soft() {
+  sync_ready || return 0
+  local err rc=0
+  err="$( validate_sync_state 2>&1 )" || rc=$?
+  [ "$rc" -eq 0 ] && return 0
+  degrade_sync "${err##*satchel: error: }"
+  return 0
+}
+
 sync_machine_registration() { # sync_machine_registration <machine-name>
   local name="$1"
   ensure_sync_identity
@@ -2271,9 +2431,15 @@ sync_machine_registration() { # sync_machine_registration <machine-name>
   git_sync diff --cached --quiet || git_sync commit -q -m "add machine $name"
   # An existing clone may be behind another machine. Integrate first so a
   # normal non-fast-forward is not misreported as a read-only deploy key.
-  if has_upstream && ! git_sync pull --rebase; then
-    die "Sync Repo pull hit a conflict — resolve it in $SYNC_DIR with normal git, then run 'satchel sync' again"
+  local reg_log; reg_log="$(mktemp)"
+  if has_upstream && ! git_sync pull --rebase >"$reg_log" 2>&1; then
+    local rec=0; recover_sync_repo || rec=$?
+    if [ "$rec" -ne 0 ]; then
+      cat "$reg_log" >&2; rm -f "$reg_log"
+      die "Sync Repo pull hit a conflict Satchel cannot merge — resolve it in $SYNC_DIR with normal git, then run 'satchel sync' again"
+    fi
   fi
+  rm -f "$reg_log"
   # This remains the write-access check: a read-only deploy key fails here,
   # after remote history is known to be integrated.
   if git_sync push -u origin HEAD; then
@@ -2288,6 +2454,15 @@ sync_machine_registration() { # sync_machine_registration <machine-name>
 cmd_sync() {
   sync_ready || die "sync is not set up — run 'satchel init' first"
   ensure_sync_identity
+  local rec=0
+  if sync_needs_recovery; then
+    recover_sync_repo || rec=$?
+    case "$rec" in
+      1) die "an unfinished Git operation in $SYNC_DIR could not be repaired automatically — resolve it there with normal git, then run 'satchel sync' again" ;;
+      2) die "a conflicting change in $SYNC_DIR could not be merged automatically.
+       The repository is clean again and nothing local was lost; reconcile it with normal git, then run 'satchel sync' again" ;;
+    esac
+  fi
   ensure_skill_library
   repair_skill_library 1
   report_skill_changes
@@ -2298,11 +2473,21 @@ cmd_sync() {
     git_sync commit -q -m "sync from $MACHINE"
     info "committed local changes"
   fi
-  # Conflicts are surfaced, never auto-resolved: a failed rebase stops here
-  # and leaves the repo for the user to resolve with plain git.
-  if has_upstream && ! git_sync pull --rebase; then
-    die "pull hit a conflict — resolve it in $SYNC_DIR with normal git, then run 'satchel sync' again"
+  # Satchel-owned registries are merged automatically; anything else stops here
+  # and is left for the user to resolve with plain git.
+  # Keep Git's own conflict narration back until it is known to matter: an
+  # auto-merged registry is routine, and printing "Resolve all conflicts
+  # manually" for something Satchel just resolved sends the user to do work
+  # that is already done. Show the real output only when it is still their job.
+  local pull_log; pull_log="$(mktemp)"
+  if has_upstream && ! git_sync pull --rebase >"$pull_log" 2>&1; then
+    rec=0; recover_sync_repo || rec=$?
+    if [ "$rec" -ne 0 ]; then
+      cat "$pull_log" >&2; rm -f "$pull_log"
+      die "pull hit a conflict Satchel cannot merge — resolve it in $SYNC_DIR with normal git, then run 'satchel sync' again"
+    fi
   fi
+  rm -f "$pull_log"
   git_sync push -u origin HEAD
   info "synced with $SYNC_URL"
 }
@@ -2318,19 +2503,149 @@ sync_needs_recovery() {
   return 1
 }
 
-quiet_pull() { # best-effort, at session start; offline is fine
-  sync_ready && has_upstream || return 0
-  if sync_needs_recovery; then
-    warn "Sync Repo has an unfinished Git operation — resolve it in $SYNC_DIR, then run 'satchel sync'"
-    return 1
+# ---------------------------------------------------- automatic conflict repair
+#
+# Satchel's shared registries are rewritten wholesale by whichever machine
+# touches them, so two machines changing different entries between syncs is the
+# normal case, not an exceptional one. Left alone that produces a conflicted
+# rebase, and every later command on that machine dies parsing the markers.
+# These files have known structure, so merge them mechanically instead of
+# asking the user to resolve a rebase by hand in a hidden state directory.
+#
+# Merge rule for both shapes: keep every key from both sides, and let the local
+# side win a genuine tie. Losing a remote entry is the only unrecoverable
+# outcome, and a union never does that.
+
+merge_conflicted_json() { # merge_conflicted_json <repo-relative-path> → 0 when merged
+  local rel="$1" ours theirs merged rc=0
+  ours="$(mktemp)"; theirs="$(mktemp)"; merged="$(mktemp)"
+  # Stage 2 is the branch being rebased onto (what the remote already has);
+  # stage 3 is the local commit being replayed.
+  git_sync show ":2:$rel" > "$ours" 2>/dev/null || rc=1
+  git_sync show ":3:$rel" > "$theirs" 2>/dev/null || rc=1
+  if [ "$rc" -eq 0 ] && jq -e . "$ours" >/dev/null 2>&1 && jq -e . "$theirs" >/dev/null 2>&1 \
+     && jq -s '.[0] * .[1]' "$ours" "$theirs" > "$merged" 2>/dev/null; then
+    cp -- "$merged" "$SYNC_DIR/$rel"
+    git_sync add -- "$rel"
+  else
+    rc=1
   fi
+  rm -f "$ours" "$theirs" "$merged"
+  return "$rc"
+}
+
+merge_conflicted_env() { # merge_conflicted_env <repo-relative-path> → 0 when merged
+  local rel="$1" ours theirs merged rc=0 key seen=$'\n' line
+  ours="$(mktemp)"; theirs="$(mktemp)"; merged="$(mktemp)"
+  git_sync show ":2:$rel" > "$ours" 2>/dev/null || rc=1
+  git_sync show ":3:$rel" > "$theirs" 2>/dev/null || rc=1
+  if [ "$rc" -eq 0 ]; then
+    # Local lines first so a locally-set value wins; remote-only keys follow.
+    while IFS= read -r line; do
+      case "$line" in ''|'#'*) continue ;; *=*) ;; *) continue ;; esac
+      key="${line%%=*}"
+      [[ "$seen" != *$'\n'"$key"$'\n'* ]] || continue
+      seen+="$key"$'\n'
+      printf '%s\n' "$line" >> "$merged"
+    done < <(cat "$theirs" "$ours")
+    cp -- "$merged" "$SYNC_DIR/$rel"
+    chmod 600 "$SYNC_DIR/$rel"
+    git_sync add -- "$rel"
+  fi
+  rm -f "$ours" "$theirs" "$merged"
+  return "$rc"
+}
+
+resolve_sync_conflicts() { # → 0 when every conflicted path was merged
+  local path rc=0 any=0
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    any=1
+    case "$path" in
+      repositories.json|mcp.json|machines/*/projects.json|skills/shared/skills-lock.json)
+        merge_conflicted_json "$path" || rc=1 ;;
+      settings.env|mcp-tokens.env)
+        merge_conflicted_env "$path" || rc=1 ;;
+      *) rc=1 ;;
+    esac
+  done < <(git_sync diff --name-only --diff-filter=U 2>/dev/null)
+  [ "$any" -eq 1 ] || return 1
+  return "$rc"
+}
+
+# Recover from an interrupted or conflicted Sync Repo operation without human
+# git surgery. Auto-merge what Satchel owns and continue; otherwise abandon the
+# operation, which is always safe — the local commit stays on the branch and
+# only the integration is postponed.
+#
+#   0 = merged and integrated; the branch advanced and is safe to push
+#   2 = abandoned back to a clean tree; local work intact but not integrated
+#   1 = still broken; caller should degrade
+recover_sync_repo() {
+  local git_dir
+  sync_needs_recovery || return 0
+  git_dir="$(git_sync rev-parse --absolute-git-dir 2>/dev/null)" || return 1
+
+  if resolve_sync_conflicts; then
+    if [ -d "$git_dir/rebase-merge" ] || [ -d "$git_dir/rebase-apply" ]; then
+      if GIT_EDITOR=true git_sync rebase --continue >/dev/null 2>&1 && ! sync_needs_recovery; then
+        info "merged a concurrent Sync Repo change automatically"
+        return 0
+      fi
+    elif [ -e "$git_dir/MERGE_HEAD" ]; then
+      if GIT_EDITOR=true git_sync commit -q --no-edit >/dev/null 2>&1 && ! sync_needs_recovery; then
+        info "merged a concurrent Sync Repo change automatically"
+        return 0
+      fi
+    fi
+  fi
+
+  # Could not merge. Abandon the in-progress operation so the machine keeps
+  # working; nothing local is lost, and 'satchel sync' retries once the
+  # conflicting file is understood.
+  git_sync rebase --abort >/dev/null 2>&1 \
+    || git_sync merge --abort >/dev/null 2>&1 \
+    || git_sync cherry-pick --abort >/dev/null 2>&1 \
+    || git_sync revert --abort >/dev/null 2>&1 || true
+  git_sync reset -q --hard >/dev/null 2>&1 || true
+  sync_needs_recovery && return 1
+  return 2
+}
+
+# Pull at session start. This is best-effort by definition: being offline,
+# behind, or even mid-conflict must never stop the agent from starting, so the
+# only non-zero return is an actual user interrupt.
+unmergeable_conflict_warning() {
+  warn "a concurrent Sync Repo change could not be merged automatically and was left for you"
+  warn "nothing local was lost; resolve $SYNC_DIR with normal git, then run 'satchel sync'"
+  return 0
+}
+
+quiet_pull() {
+  sync_ready || return 0
+  local rec=0
+  # Recovery is checked before has_upstream on purpose: an interrupted rebase
+  # detaches HEAD, so '@{u}' does not resolve and the old ordering skipped this
+  # check in exactly the state it exists to catch.
+  if sync_needs_recovery; then
+    recover_sync_repo || rec=$?
+    case "$rec" in
+      1) degrade_sync "an unfinished Git operation in $SYNC_DIR could not be repaired automatically"; return 0 ;;
+      2) unmergeable_conflict_warning; return 0 ;;
+    esac
+  fi
+  has_upstream || return 0
   local rc=0
-  timeout 20 git -C "$SYNC_DIR" pull --rebase --autostash -q 2>/dev/null || rc=$?
+  timeout 20 git -C "$SYNC_DIR" pull --rebase --autostash -q >/dev/null 2>&1 || rc=$?
   [ "$rc" -eq 130 ] && return 130
   if [ "$rc" -ne 0 ]; then
     if sync_needs_recovery; then
-      warn "Sync Repo pull hit a conflict — resolve it in $SYNC_DIR, then run 'satchel sync'"
-      return 1
+      rec=0; recover_sync_repo || rec=$?
+      case "$rec" in
+        1) degrade_sync "a Sync Repo conflict in $SYNC_DIR could not be merged automatically" ;;
+        2) unmergeable_conflict_warning ;;
+      esac
+      return 0
     fi
     warn "could not reach the Sync Repo — continuing with what's local"
   fi
@@ -2340,20 +2655,33 @@ quiet_pull() { # best-effort, at session start; offline is fine
 quiet_push() { # quiet_push <message> — best-effort commit+push of the Sync Repo
   sync_ready || return 0
   ensure_sync_identity
-  validate_sync_state
+  validate_sync_state_soft
+  sync_ready || return 0
   git_sync add -A
   git_sync diff --cached --quiet && return 0
   git_sync commit -q -m "$1" || return 0
-  if has_upstream && ! timeout 30 git -C "$SYNC_DIR" pull --rebase -q 2>/dev/null; then
+  if has_upstream && ! timeout 30 git -C "$SYNC_DIR" pull --rebase -q >/dev/null 2>&1; then
     if sync_needs_recovery; then
-      warn "Sync Repo pull conflicted — this session is committed locally; resolve it in $SYNC_DIR, then run 'satchel sync'"
+      local rec=0
+      recover_sync_repo || rec=$?
+      case "$rec" in
+        1) degrade_sync "a Sync Repo conflict in $SYNC_DIR could not be merged automatically"
+           warn "this session is committed locally and is not lost"
+           return 0 ;;
+        2) unmergeable_conflict_warning
+           # Abandoning left the branch behind the remote, so there is nothing
+           # safe to push yet. The commit is on the branch and survives.
+           warn "this session is committed locally and is not lost"
+           return 0 ;;
+      esac
     else
       warn "could not reach the Sync Repo — this session is committed locally; run 'satchel sync' when back online"
+      return 0
     fi
-    return 0
   fi
   timeout 30 git -C "$SYNC_DIR" push -q -u origin HEAD 2>/dev/null \
     || warn "could not push the Sync Repo — the change is committed locally; run 'satchel sync' when back online"
+  return 0
 }
 
 # Announce when GitHub main carries a newer script than the one running.
@@ -2404,6 +2732,37 @@ validate_machine_state() {
     valid_machine_name "$name" \
       || die "unsafe machine directory '$name' in the Sync Repo"
   done < <(find -P "$SYNC_DIR/machines" -mindepth 1 -maxdepth 1 -print0)
+}
+
+# "Works on one machine, errors on the other" is usually not a Satchel bug: the
+# container image is built per machine from floating upstream tags, so two
+# machines legitimately run different agent versions. Publish what this machine
+# actually has so doctor can name the difference instead of leaving the user to
+# guess. Written from the build-time cache; no container starts here.
+machine_environment_file() { printf '%s/environment.json' "$(machine_dir)"; }
+
+publish_machine_environment() {
+  sync_ready || return 0
+  local dir f commit=""
+  dir="$(machine_dir)"; mkdir -p "$dir"
+  f="$(machine_environment_file)"
+  [ ! -f "$SCRIPT_SHA_FILE" ] || commit="$(tr -cd 'a-f0-9' < "$SCRIPT_SHA_FILE" | cut -c1-7)"
+  jq -n --arg v "$SATCHEL_VERSION" --arg c "$commit" \
+        --arg e "${ENGINE:-}" --arg a "$(cached_image_agents)" \
+    '{satchel: $v, commit: $c, engine: $e, agents: $a}' > "$f.tmp" \
+    && mv -f "$f.tmp" "$f"
+  rm -f "$f.tmp"
+  return 0
+}
+
+caravan_environments() { # prints "machine<TAB>satchel<TAB>commit<TAB>agents"
+  local f m
+  for f in "$SYNC_DIR"/machines/*/environment.json; do
+    [ -f "$f" ] || continue
+    m="$(basename "$(dirname "$f")")"
+    jq -r --arg m "$m" \
+      '[$m, (.satchel // "?"), (.commit // ""), (.agents // "")] | @tsv' "$f" 2>/dev/null || true
+  done
 }
 
 warn_machine_notes_size() {
@@ -2784,6 +3143,13 @@ fix_home_ownership() { # fix_home_ownership <Satchel-managed-path>
     return 0
   fi
   [ -n "$mismatch" ] || return 0
+  # Root-run hosts (Unraid) hit this on nearly every session, because Satchel
+  # itself writes the agent config and handoffs as root moments earlier. Doing
+  # the chown directly avoids starting two throwaway containers per session
+  # just to repair files this process created.
+  if [ "$(id -u)" -eq 0 ]; then
+    chown -R "$SATCHEL_UID:$SATCHEL_GID" "$1" 2>/dev/null && return 0
+  fi
   local label=()
   if selinux_active; then label=(--security-opt label=disable); fi
   if "$(engine)" run --rm --label "$MANAGED_CONTAINER_LABEL" --user 0:0 \
@@ -2817,9 +3183,11 @@ finalize_session_sync() { # finalize_session_sync <project-id-or-empty>
   # edited synced files even without a handoff to write.
   if [ -z "$SYNC_BLOCK_REASON" ]; then
     warn_machine_notes_size
+    publish_machine_environment
     quiet_push "session: ${slug:-untracked} on $MACHINE"
   else
-    warn "automatic sync skipped: $SYNC_BLOCK_REASON; review machine notes, then run 'satchel sync'"
+    warn "automatic sync skipped: $SYNC_BLOCK_REASON"
+    warn "this session's work is safe on this machine; run 'satchel doctor' and then 'satchel sync'"
   fi
 }
 
@@ -2862,6 +3230,54 @@ session_mount_guard() {
   fi
   die "refusing to start a session in $PWD — that would mount your entire home directory (SSH keys, MCP tokens, logins) read-write into the sandbox.
        cd into a project directory, or run 'satchel --unsafe-home $1' if you really mean it."
+}
+
+# On a root-run host (Unraid) the session runs as SATCHEL_UID while project
+# files belong to root. Two things then break in ways that look like the agent
+# malfunctioning: writes are refused, and Git — which since 2.35 refuses to
+# operate on a repository owned by another user — fails every command with
+# "detected dubious ownership". Declaring the mounted roots safe costs nothing
+# on hosts where the uid already matches, and the writability check turns a
+# confusing mid-session failure into one sentence at launch.
+declare_session_safe_directories() { # declare_session_safe_directories <agent-home> <project>
+  local home="$1" cfg="$1/.gitconfig" d
+  shift
+  mkdir -p "$home"
+  for d in "$@"; do
+    [ -n "$d" ] || continue
+    git config --file "$cfg" --fixed-value --get-all safe.directory "$d" >/dev/null 2>&1 \
+      || git config --file "$cfg" --add safe.directory "$d"
+  done
+  return 0
+}
+
+session_can_write() { # session_can_write <path>
+  local uid gid mode owner group other
+  read -r uid gid mode < <(stat -c '%u %g %a' "$1" 2>/dev/null) || return 0
+  mode="$(printf '%03d' "$((10#$mode % 1000))")"
+  owner="${mode:0:1}"; group="${mode:1:1}"; other="${mode:2:1}"
+  [ "$uid" = "$SATCHEL_UID" ] && [ $((owner & 2)) -ne 0 ] && return 0
+  [ "$gid" = "$SATCHEL_GID" ] && [ $((group & 2)) -ne 0 ] && return 0
+  [ $((other & 2)) -ne 0 ] && return 0
+  return 1
+}
+
+warn_unwritable_mounts() { # warn_unwritable_mounts <path>...
+  [ "$HOST_MODE" -eq 0 ] || return 0
+  [ "$(id -u)" -eq 0 ] || return 0
+  local d bad=()
+  for d in "$@"; do
+    [ -n "$d" ] || continue
+    session_can_write "$d" || bad+=("$d")
+  done
+  [ ${#bad[@]} -gt 0 ] || return 0
+  warn "this session runs as uid $SATCHEL_UID, but these directories are not writable by it:"
+  for d in "${bad[@]}"; do warn "  $d"; done
+  warn "the agent will be able to read but not edit them. Fix with one of:"
+  warn "  chown -R $SATCHEL_UID:$SATCHEL_GID ${bad[0]}    (recommended)"
+  warn "  satchel settings SATCHEL_UID 0 --local          (run the session as root)"
+  warn "  satchel --host claude                           (Host Session, no sandbox)"
+  return 0
 }
 
 # --with mounts extra project directories into the session, for work that
@@ -2929,18 +3345,25 @@ cmd_session() {
   # loaded moments later for the session — a misleading startup failure.
   # Install cleanup first so Ctrl-C during a passphrase prompt cannot leave a
   # temporary agent behind.
-  trap 'stop_temporary_ssh_agent' EXIT
-  ssh_preflight || return $?
+  SESSION_STAMP=""
+  trap 'stop_temporary_ssh_agent; [ -z "$SESSION_STAMP" ] || rm -f "$SESSION_STAMP"' EXIT
+  # Catch INT from here rather than just before the engine runs. Startup does
+  # real work — pulling, repairing the Sync Repo, chowning agent homes — and a
+  # Ctrl-C landing there used to kill Satchel outright. A caught handler (not
+  # an ignored one) still lets children see the signal, so ssh-add passphrase
+  # prompts and the interactive agent behave exactly as before.
+  trap ':' INT
+  ssh_preflight "$agent" || return $?
+  # The EXIT trap stays installed either way: it also removes the transcript
+  # stamp, and stop_temporary_ssh_agent is a no-op when no agent was started.
   local temporary_agent=0
-  if [ -n "$TEMP_SSH_AGENT_PID" ]; then
-    temporary_agent=1
-  else
-    trap - EXIT
-  fi
+  [ -z "$TEMP_SSH_AGENT_PID" ] || temporary_agent=1
 
   quiet_pull || return $?
   if sync_ready; then
-    validate_sync_state
+    # Soft validation: a malformed or conflicted Sync Repo degrades syncing for
+    # this run instead of refusing to start the agent at all.
+    validate_sync_state_soft
     ensure_skill_library
     repair_skill_library 0
   fi
@@ -2976,6 +3399,13 @@ cmd_session() {
   # Compose exports Codex's short-lived MCP variables and may create missing
   # shared mount roots. Do it before the final ownership boundary.
   compose_run_args "$agent" "$home" "$project"
+  # Git refuses to touch a repository owned by another user, which is the
+  # normal case on a root-run host. Declare the mounted roots trusted, and say
+  # plainly if the agent will not be able to write them.
+  if [ "$HOST_MODE" -eq 0 ]; then
+    declare_session_safe_directories "$home" "$project" ${WITH_DIRS[@]+"${WITH_DIRS[@]}"}
+    warn_unwritable_mounts "$project" ${WITH_DIRS[@]+"${WITH_DIRS[@]}"}
+  fi
   # This is the final host-side write boundary before the agent starts.
   # Root-run hosts may have just materialized config, memory, and mount roots.
   fix_home_ownership "$home"
@@ -2986,12 +3416,14 @@ cmd_session() {
   # A handoff is only worth writing if a conversation actually happened —
   # detected as new transcript files in the agent home during the session.
   # Trivial runs (--version, instant quits) must not overwrite a good handoff.
-  local tdir stamp
+  # SESSION_STAMP, not a local: the EXIT trap removes it if Satchel dies before
+  # reaching normal cleanup.
+  local tdir
   case "$agent" in
     claude) tdir="$home/.claude/projects" ;;
     codex)  tdir="$home/.codex/sessions" ;;
   esac
-  stamp="$(mktemp)"
+  SESSION_STAMP="$(mktemp)"
 
   # Codex's own sandbox (bubblewrap) cannot create namespaces inside the
   # container, and the container IS the sandbox here — so codex runs with its
@@ -3002,11 +3434,10 @@ cmd_session() {
     launch=(codex -c 'sandbox_mode="danger-full-access"' -c check_for_update_on_startup=false)
   fi
 
-  # Keep Satchel itself alive through Ctrl-C: a caught trap resets to the
-  # default in the external container engine, so the interactive agent still
-  # receives SIGINT normally.
+  # INT is already caught (installed before startup work). A caught trap resets
+  # to the default in the external container engine, so the interactive agent
+  # still receives SIGINT normally.
   local rc=0
-  trap ':' INT
   "$(engine)" run --rm "${tty[@]}" "${RUN_ARGS[@]}" "$IMAGE" "${launch[@]}" "$@" || rc=$?
   clear_codex_mcp_env
   # After the interactive engine exits, ignore INT instead of merely catching
@@ -3024,7 +3455,7 @@ cmd_session() {
 
   if sync_ready; then
     if [ -z "${SATCHEL_NO_HANDOFF:-}" ] \
-       && [ -d "$tdir" ] && [ -n "$(find "$tdir" -type f -newer "$stamp" -print -quit 2>/dev/null)" ]; then
+       && [ -d "$tdir" ] && [ -n "$(find "$tdir" -type f -newer "$SESSION_STAMP" -print -quit 2>/dev/null)" ]; then
       # Re-scan because a session may have cloned or initialized repositories.
       # Unknown repos are offered only if handoff analysis identifies
       # substantive work in them; ordinary directories never prompt.
@@ -3036,13 +3467,11 @@ cmd_session() {
     run_isolated_task protect finalize_session_sync "$slug" \
       || warn "post-session validation or sync did not complete; run 'satchel sync' to retry"
   fi
-  rm -f "$stamp"
+  rm -f "$SESSION_STAMP"; SESSION_STAMP=""
   # Keep the temporary agent through the host-side Sync Repo push, then tear
   # it down. The handoff worker never receives its socket.
-  if [ "$temporary_agent" -eq 1 ]; then
-    stop_temporary_ssh_agent
-    trap - EXIT
-  fi
+  [ "$temporary_agent" -eq 0 ] || stop_temporary_ssh_agent
+  trap - EXIT
   trap - INT
   return "$rc"
 }
@@ -3053,17 +3482,30 @@ cmd_session() {
 # host stays manual — satchel never talks to a git host's API.
 have_pubkey() { compgen -G "$HOME/.ssh/*.pub" >/dev/null; }
 
+# Unraid wipes /root/.ssh at every boot; keep a copy on flash so the
+# /boot/config/go block written by install.sh can restore it. The flash is
+# unencrypted FAT — acceptable for a key scoped to the private sync repo.
+# known_hosts goes too: without it the first sync after every reboot stalls on
+# host verification and then reports the remote as unreachable.
+persist_unraid_ssh() { # persist_unraid_ssh [quiet]
+  [ -f /etc/unraid-version ] && [ -d /boot/config ] || return 0
+  local key copied=0
+  key="$(standard_private_keys | head -n 1)"
+  [ -n "$key" ] || return 0
+  mkdir -p /boot/config/ssh/root
+  if [ ! -f "/boot/config/ssh/root/$(basename "$key")" ]; then
+    cp "$key" "$key.pub" /boot/config/ssh/root/ 2>/dev/null && copied=1
+  fi
+  [ ! -f "$HOME/.ssh/known_hosts" ] || cp "$HOME/.ssh/known_hosts" /boot/config/ssh/root/ 2>/dev/null || true
+  [ "$copied" -eq 0 ] || [ "${1:-}" = quiet ] \
+    || info "Unraid: SSH key copied to /boot/config/ssh/root so it survives reboots"
+  return 0
+}
+
 generate_key() {
   mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"
   ssh-keygen -q -t ed25519 -N "" -f "$HOME/.ssh/id_ed25519" -C "satchel@$MACHINE"
-  # Unraid wipes /root/.ssh at every boot; keep a copy on flash so the
-  # /boot/config/go block written by install.sh can restore it. The flash is
-  # unencrypted FAT — acceptable for a key scoped to the private sync repo.
-  if [ -f /etc/unraid-version ] && [ -d /boot/config ]; then
-    mkdir -p /boot/config/ssh/root
-    cp "$HOME/.ssh/id_ed25519" "$HOME/.ssh/id_ed25519.pub" /boot/config/ssh/root/
-    info "Unraid: key copied to /boot/config/ssh/root so it survives reboots"
-  fi
+  persist_unraid_ssh
 }
 
 print_pubkeys() { # print_pubkeys "context message"
@@ -3076,9 +3518,20 @@ print_pubkeys() { # print_pubkeys "context message"
 }
 
 cmd_key() {
+  local persist=0
+  case "${1:-}" in
+    --persist) persist=1 ;;
+    "") ;;
+    *) die "usage: satchel key [--persist]" ;;
+  esac
   if ! have_pubkey; then
     info "no SSH key on this machine — generating one"
     generate_key
+  elif [ "$persist" -eq 1 ]; then
+    # Only generate_key backed keys up before, so a machine that already had a
+    # key when it joined kept nothing on flash and lost SSH at the next reboot.
+    persist_unraid_ssh
+    [ -f /etc/unraid-version ] || info "--persist only applies on Unraid; nothing to do here"
   fi
   print_pubkeys "this machine's public key — add it to your git host (profile SSH keys, or the repo's deploy keys with write access):"
 }
@@ -3285,7 +3738,7 @@ cmd_settings() {
       src="$(settings_source "$k")"
       if [ "$src" = default ]; then
         case "$k" in
-          SATCHEL_ENGINE) val="$(engine 2>/dev/null || echo '?')"; src="detected" ;;
+          SATCHEL_ENGINE) val="$(detect_engine)"; val="${val:-none found}"; src="detected" ;;
           SATCHEL_UID|SATCHEL_GID) : ;;                      # resolved in load_config
           *) val="$def" ;;
         esac
@@ -3426,7 +3879,9 @@ cmd_status() {
   done
   out_header "Satchel $SATCHEL_VERSION on $MACHINE"
   local e img="not built"
-  e="$(engine 2>/dev/null || true)"
+  # detect_engine, not engine: a reporting command must still print the rest of
+  # the report on a host with no container engine.
+  e="$(detect_engine)"
   if [ -n "$e" ] && "$e" image inspect "$IMAGE" >/dev/null 2>&1; then
     img="built"
     local av; av="$(image_agent_versions)"
@@ -3533,6 +3988,7 @@ cmd_doctor() {
   if [ -n "$e" ] && "$e" image inspect "$IMAGE" >/dev/null 2>&1; then
     local av; av="$(image_agent_versions)"
     d_ok "image: built${av:+ ($av)}"
+    [ -z "$av" ] || printf '%s\n' "$av" > "$IMAGE_AGENTS_FILE"
     if engine_mount_probe; then
       d_ok "bind mounts: engine can read Satchel's local state"
     else
@@ -3593,6 +4049,46 @@ cmd_doctor() {
     fi
   fi
 
+  # Cross-machine drift: each machine builds its own image from floating tags,
+  # so identical Satchel versions can still run different agents. Name it here
+  # rather than letting it surface as "it works on the other box".
+  if sync_ready; then
+    local m mv mc ma mine skew=0
+    mine="$(cached_image_agents)"
+    while IFS=$'\t' read -r m mv mc ma; do
+      [ -n "$m" ] && [ "$m" != "$MACHINE" ] || continue
+      if [ "$mv" != "$SATCHEL_VERSION" ]; then
+        d_warn "caravan: $m runs satchel $mv, this machine runs $SATCHEL_VERSION — 'satchel update' on the older one"
+        skew=1
+      elif [ -n "$mine" ] && [ -n "$ma" ] && [ "$ma" != "$mine" ]; then
+        d_warn "caravan: $m has [$ma], this machine has [$mine] — 'satchel update' to converge"
+        skew=1
+      fi
+    done < <(caravan_environments)
+    [ "$skew" -eq 1 ] || d_ok "caravan: no version drift detected"
+  fi
+
+  # Unraid rebuilds / and /root from flash at every boot, so anything Satchel
+  # needs there has to exist on flash too.
+  if [ -f /etc/unraid-version ]; then
+    if [ -d /boot/config ]; then
+      if compgen -G '/boot/config/ssh/root/id_*' >/dev/null; then
+        d_ok "unraid: sync SSH key is backed up to flash"
+      elif [ -n "$(standard_private_keys)" ]; then
+        d_warn "unraid: the SSH key in \$HOME/.ssh is not on flash and will vanish at reboot — run 'satchel key --persist'"
+      fi
+      if grep -qsF '# >>> satchel boot persistence >>>' /boot/config/go; then
+        d_ok "unraid: boot persistence block present in /boot/config/go"
+      else
+        d_warn "unraid: no boot-persistence block in /boot/config/go — shims and key will not survive a reboot"
+      fi
+    fi
+    case "$(readlink -f "$SATCHEL_DIR")" in
+      /mnt/*) d_ok "unraid: state directory is on persistent storage" ;;
+      *) d_fail "unraid: state directory $SATCHEL_DIR is not under /mnt — it is wiped at every reboot" ;;
+    esac
+  fi
+
   if [ -f "$MCP_FILE" ]; then
     local name url auth code
     while IFS=$'\t' read -r name url auth; do
@@ -3645,17 +4141,26 @@ cmd_update() {
   sha="$(curl -fsSL "https://api.github.com/repos/$SATCHEL_REPO/commits/main" 2>/dev/null | jq -r '.sha // empty')" || sha=""
   ref="${sha:-main}"
   [ -z "$sha" ] && warn "could not resolve latest commit via the GitHub API — falling back to 'main' (may be up to ~5 min stale)"
-  tmp="$(mktemp)"
+  # Stage the download beside the installed command so the replacement is a
+  # same-filesystem rename. A cross-device 'mv' copies into the existing inode
+  # instead, and Bash — which reads a script incrementally and seeks back into
+  # the file between top-level commands — then resumes at the old offset inside
+  # the new, longer file and executes a fragment of it. That is the normal
+  # layout on Unraid, where /tmp is tmpfs and Satchel lives on the array.
+  tmp="$(mktemp "$(dirname "$self")/.satchel-update.XXXXXX")" \
+    || tmp="$(mktemp)"
+  trap 'rm -f -- "$tmp"' EXIT
   curl -fsSL "https://raw.githubusercontent.com/$SATCHEL_REPO/$ref/satchel" -o "$tmp" || die "download failed"
   bash -n "$tmp" || die "downloaded script does not parse — not installing it"
   [ -f "$SCRIPT_SHA_FILE" ] && old="$(cat "$SCRIPT_SHA_FILE")"
   if cmp -s "$tmp" "$self"; then
-    rm -f "$tmp"
+    rm -f "$tmp"; trap - EXIT
     info "satchel script already up to date (${sha:0:7})"
   else
     print_update_log "$old" "$sha"
     chmod 755 "$tmp"
     mv "$tmp" "$self" 2>/dev/null || { need_cmd sudo; sudo mv "$tmp" "$self"; }
+    trap - EXIT
     info "satchel updated to commit ${sha:0:7} ($self)"
   fi
   # The new artifact must own the rebuild: this process still has the previous
@@ -3708,7 +4213,8 @@ caravan
   satchel status [--ignored]   caravan roster, projects, handoffs, MCP, skills
   satchel skills [list]        list active user-installed skills
   satchel skills remove [name] remove a skill caravan-wide (bare: numbered picker)
-  satchel key                  show this machine's SSH public key (makes one if needed)
+  satchel key [--persist]      show this machine's SSH public key (makes one if needed);
+                             --persist copies an existing key to Unraid flash
   satchel retire [machine]     remove a machine from the caravan (picks from a list)
   satchel doctor               check this machine's whole setup and say what's wrong
 
@@ -3821,4 +4327,8 @@ main() {
   esac
 }
 
-main "$@"
+# Kept on one line, and last: 'satchel update' replaces this file in place, and
+# Bash seeks back into a script between top-level commands. Exiting here means
+# there is never a later offset for it to resume into. (tests/ source the
+# artifact with the final line stripped, so this must stay a single line.)
+main "$@"; exit $?

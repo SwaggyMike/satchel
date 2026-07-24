@@ -5,17 +5,30 @@
 # host stays manual — satchel never talks to a git host's API.
 have_pubkey() { compgen -G "$HOME/.ssh/*.pub" >/dev/null; }
 
+# Unraid wipes /root/.ssh at every boot; keep a copy on flash so the
+# /boot/config/go block written by install.sh can restore it. The flash is
+# unencrypted FAT — acceptable for a key scoped to the private sync repo.
+# known_hosts goes too: without it the first sync after every reboot stalls on
+# host verification and then reports the remote as unreachable.
+persist_unraid_ssh() { # persist_unraid_ssh [quiet]
+  [ -f /etc/unraid-version ] && [ -d /boot/config ] || return 0
+  local key copied=0
+  key="$(standard_private_keys | head -n 1)"
+  [ -n "$key" ] || return 0
+  mkdir -p /boot/config/ssh/root
+  if [ ! -f "/boot/config/ssh/root/$(basename "$key")" ]; then
+    cp "$key" "$key.pub" /boot/config/ssh/root/ 2>/dev/null && copied=1
+  fi
+  [ ! -f "$HOME/.ssh/known_hosts" ] || cp "$HOME/.ssh/known_hosts" /boot/config/ssh/root/ 2>/dev/null || true
+  [ "$copied" -eq 0 ] || [ "${1:-}" = quiet ] \
+    || info "Unraid: SSH key copied to /boot/config/ssh/root so it survives reboots"
+  return 0
+}
+
 generate_key() {
   mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"
   ssh-keygen -q -t ed25519 -N "" -f "$HOME/.ssh/id_ed25519" -C "satchel@$MACHINE"
-  # Unraid wipes /root/.ssh at every boot; keep a copy on flash so the
-  # /boot/config/go block written by install.sh can restore it. The flash is
-  # unencrypted FAT — acceptable for a key scoped to the private sync repo.
-  if [ -f /etc/unraid-version ] && [ -d /boot/config ]; then
-    mkdir -p /boot/config/ssh/root
-    cp "$HOME/.ssh/id_ed25519" "$HOME/.ssh/id_ed25519.pub" /boot/config/ssh/root/
-    info "Unraid: key copied to /boot/config/ssh/root so it survives reboots"
-  fi
+  persist_unraid_ssh
 }
 
 print_pubkeys() { # print_pubkeys "context message"
@@ -28,9 +41,20 @@ print_pubkeys() { # print_pubkeys "context message"
 }
 
 cmd_key() {
+  local persist=0
+  case "${1:-}" in
+    --persist) persist=1 ;;
+    "") ;;
+    *) die "usage: satchel key [--persist]" ;;
+  esac
   if ! have_pubkey; then
     info "no SSH key on this machine — generating one"
     generate_key
+  elif [ "$persist" -eq 1 ]; then
+    # Only generate_key backed keys up before, so a machine that already had a
+    # key when it joined kept nothing on flash and lost SSH at the next reboot.
+    persist_unraid_ssh
+    [ -f /etc/unraid-version ] || info "--persist only applies on Unraid; nothing to do here"
   fi
   print_pubkeys "this machine's public key — add it to your git host (profile SSH keys, or the repo's deploy keys with write access):"
 }

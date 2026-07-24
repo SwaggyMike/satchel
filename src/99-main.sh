@@ -39,4 +39,8 @@ main() {
   esac
 }
 
-main "$@"
+# Kept on one line, and last: 'satchel update' replaces this file in place, and
+# Bash seeks back into a script between top-level commands. Exiting here means
+# there is never a later offset for it to resume into. (tests/ source the
+# artifact with the final line stripped, so this must stay a single line.)
+main "$@"; exit $?

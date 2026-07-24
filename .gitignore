@@ -6,3 +6,7 @@ skills/shared/.system/
 
 # Local working notes
 REWRITE-PROMPT.md
+
+# scripts/build.sh stages the artifact in the repo so the final move is an
+# atomic same-filesystem rename; a killed build leaves one behind.
+.satchel-build.*

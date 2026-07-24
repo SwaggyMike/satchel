@@ -27,7 +27,7 @@ cmd_settings() {
       src="$(settings_source "$k")"
       if [ "$src" = default ]; then
         case "$k" in
-          SATCHEL_ENGINE) val="$(engine 2>/dev/null || echo '?')"; src="detected" ;;
+          SATCHEL_ENGINE) val="$(detect_engine)"; val="${val:-none found}"; src="detected" ;;
           SATCHEL_UID|SATCHEL_GID) : ;;                      # resolved in load_config
           *) val="$def" ;;
         esac

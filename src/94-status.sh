@@ -12,7 +12,9 @@ cmd_status() {
   done
   out_header "Satchel $SATCHEL_VERSION on $MACHINE"
   local e img="not built"
-  e="$(engine 2>/dev/null || true)"
+  # detect_engine, not engine: a reporting command must still print the rest of
+  # the report on a host with no container engine.
+  e="$(detect_engine)"
   if [ -n "$e" ] && "$e" image inspect "$IMAGE" >/dev/null 2>&1; then
     img="built"
     local av; av="$(image_agent_versions)"

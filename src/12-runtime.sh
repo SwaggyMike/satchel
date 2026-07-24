@@ -16,17 +16,45 @@ load_config() {
     else SATCHEL_UID="$uid"; SATCHEL_GID="$(id -g)"; fi
   fi
   SATCHEL_GID="${SATCHEL_GID:-$SATCHEL_UID}"
+  # Satchel's own git runs unattended with stderr suppressed under a timeout,
+  # so an interactive host-key prompt reads as "the remote is unreachable"
+  # after a 20-second stall. That happens on every boot of a host that rebuilds
+  # /root (Unraid), where known_hosts is gone. Accept-new records the key once.
+  export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o StrictHostKeyChecking=accept-new}"
 }
 
-sync_ready() { [ -n "$SYNC_URL" ] && [ -d "$SYNC_DIR/.git" ]; }
+# A degraded Sync Repo must never stop an agent from running: every mount,
+# read, and push is already guarded by sync_ready, so turning this one
+# predicate off cleanly disables syncing for the rest of the run.
+sync_ready() {
+  [ "$SYNC_DEGRADED" -eq 0 ] || return 1
+  [ -n "$SYNC_URL" ] && [ -d "$SYNC_DIR/.git" ]
+}
+
+degrade_sync() { # degrade_sync <reason> — stop syncing this run; the session continues
+  [ "$SYNC_DEGRADED" -eq 0 ] || return 0
+  SYNC_DEGRADED=1
+  SYNC_BLOCK_REASON="$1"
+  warn "Sync Repo unusable: $1"
+  warn "this session runs normally, but nothing will sync — run 'satchel doctor' to see why"
+  return 0
+}
+
+# Engine detection has two callers with different needs: a session must fail
+# loudly without an engine, while reporting commands (status, settings) must
+# still print everything else. Keep detection total and let select_engine own
+# the failure, so a missing engine can never abort a read-only command.
+detect_engine() { # prints docker|podman, or nothing; never exits
+  if [ -n "${SATCHEL_ENGINE:-}" ]; then printf '%s' "$SATCHEL_ENGINE"
+  elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then printf 'docker'
+  elif command -v podman >/dev/null 2>&1; then printf 'podman'
+  fi
+}
 
 select_engine() {
   [ -z "$ENGINE" ] || return 0
-  if [ -n "${SATCHEL_ENGINE:-}" ]; then ENGINE="$SATCHEL_ENGINE"
-  elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then ENGINE=docker
-  elif command -v podman >/dev/null 2>&1; then ENGINE=podman
-  else die "neither docker nor podman is available"
-  fi
+  ENGINE="$(detect_engine)"
+  [ -n "$ENGINE" ] || die "neither docker nor podman is available"
 }
 
 engine() {
@@ -158,16 +186,25 @@ ssh_forwarding() {
 
 # Session-start preflight: say up front what git-over-SSH will do, instead of
 # letting the first push inside the sandbox fail mysteriously.
-ssh_preflight() {
+ssh_preflight() { # ssh_preflight [agent] — agent only sharpens the guidance
+  local agent="${1:-claude}"
   local state="${SSH_STATE:=$(ssh_agent_state)}" key rc=0
   local keys=()
   while IFS= read -r key; do keys+=("$key"); done < <(standard_private_keys)
 
   # A root-owned host socket cannot normally be reached by a normal UID-1000
   # session. Prefer a temporary socket whose ownership Satchel controls.
+  local shared_agent_refused=0
   if [ "$(id -u)" -eq 0 ] && [ "$HOST_MODE" -eq 0 ] && [ "$state" != off ]; then
+    case "$state" in ready|empty) shared_agent_refused=1 ;; esac
     state=none
     SSH_STATE=none
+  fi
+  # Say why a working agent was set aside. Otherwise the fallback message below
+  # claims there is no agent at all, which contradicts what the user can see.
+  if [ "$shared_agent_refused" -eq 1 ] && [ ${#keys[@]} -eq 0 ]; then
+    warn "this host's ssh-agent belongs to root and cannot be shared with a uid-$SATCHEL_UID session"
+    warn "save a standard key at \$HOME/.ssh/id_ed25519 for Satchel to load, or use 'satchel --host $agent' when you need root's agent"
   fi
 
   case "$state" in

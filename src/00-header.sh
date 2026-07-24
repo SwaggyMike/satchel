@@ -27,6 +27,7 @@ LOCAL_TOKENS_FILE="$SATCHEL_DIR/mcp-tokens.local.env"
 SCRIPT_SHA_FILE="$SATCHEL_DIR/script-sha"
 INSTALL_PATH_FILE="$SATCHEL_DIR/install-path"
 SKILL_QUARANTINE_DIR="$SATCHEL_DIR/quarantine/skills"
+IMAGE_AGENTS_FILE="$SATCHEL_DIR/image-agents"
 IMAGE="localhost/satchel:latest"
 MANAGED_CONTAINER_LABEL="io.github.swaggymike.satchel.managed=true"
 
@@ -43,6 +44,10 @@ BASELINE_VERSION=2
 MACHINE_NOTES_WORD_LIMIT=750
 HANDOFF_RETENTION=10
 SYNC_BLOCK_REASON=""
+# Set when the Sync Repo is broken beyond automatic repair. Sessions still run;
+# only syncing stops. See degrade_sync.
+SYNC_DEGRADED=0
+SESSION_STAMP=""
 BASELINE_LAUNCH_OUTCOME="continue"
 BASELINE_LAUNCH_STATUS=0
 

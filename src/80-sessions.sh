@@ -140,6 +140,13 @@ fix_home_ownership() { # fix_home_ownership <Satchel-managed-path>
     return 0
   fi
   [ -n "$mismatch" ] || return 0
+  # Root-run hosts (Unraid) hit this on nearly every session, because Satchel
+  # itself writes the agent config and handoffs as root moments earlier. Doing
+  # the chown directly avoids starting two throwaway containers per session
+  # just to repair files this process created.
+  if [ "$(id -u)" -eq 0 ]; then
+    chown -R "$SATCHEL_UID:$SATCHEL_GID" "$1" 2>/dev/null && return 0
+  fi
   local label=()
   if selinux_active; then label=(--security-opt label=disable); fi
   if "$(engine)" run --rm --label "$MANAGED_CONTAINER_LABEL" --user 0:0 \
@@ -173,9 +180,11 @@ finalize_session_sync() { # finalize_session_sync <project-id-or-empty>
   # edited synced files even without a handoff to write.
   if [ -z "$SYNC_BLOCK_REASON" ]; then
     warn_machine_notes_size
+    publish_machine_environment
     quiet_push "session: ${slug:-untracked} on $MACHINE"
   else
-    warn "automatic sync skipped: $SYNC_BLOCK_REASON; review machine notes, then run 'satchel sync'"
+    warn "automatic sync skipped: $SYNC_BLOCK_REASON"
+    warn "this session's work is safe on this machine; run 'satchel doctor' and then 'satchel sync'"
   fi
 }
 
@@ -218,6 +227,54 @@ session_mount_guard() {
   fi
   die "refusing to start a session in $PWD — that would mount your entire home directory (SSH keys, MCP tokens, logins) read-write into the sandbox.
        cd into a project directory, or run 'satchel --unsafe-home $1' if you really mean it."
+}
+
+# On a root-run host (Unraid) the session runs as SATCHEL_UID while project
+# files belong to root. Two things then break in ways that look like the agent
+# malfunctioning: writes are refused, and Git — which since 2.35 refuses to
+# operate on a repository owned by another user — fails every command with
+# "detected dubious ownership". Declaring the mounted roots safe costs nothing
+# on hosts where the uid already matches, and the writability check turns a
+# confusing mid-session failure into one sentence at launch.
+declare_session_safe_directories() { # declare_session_safe_directories <agent-home> <project>
+  local home="$1" cfg="$1/.gitconfig" d
+  shift
+  mkdir -p "$home"
+  for d in "$@"; do
+    [ -n "$d" ] || continue
+    git config --file "$cfg" --fixed-value --get-all safe.directory "$d" >/dev/null 2>&1 \
+      || git config --file "$cfg" --add safe.directory "$d"
+  done
+  return 0
+}
+
+session_can_write() { # session_can_write <path>
+  local uid gid mode owner group other
+  read -r uid gid mode < <(stat -c '%u %g %a' "$1" 2>/dev/null) || return 0
+  mode="$(printf '%03d' "$((10#$mode % 1000))")"
+  owner="${mode:0:1}"; group="${mode:1:1}"; other="${mode:2:1}"
+  [ "$uid" = "$SATCHEL_UID" ] && [ $((owner & 2)) -ne 0 ] && return 0
+  [ "$gid" = "$SATCHEL_GID" ] && [ $((group & 2)) -ne 0 ] && return 0
+  [ $((other & 2)) -ne 0 ] && return 0
+  return 1
+}
+
+warn_unwritable_mounts() { # warn_unwritable_mounts <path>...
+  [ "$HOST_MODE" -eq 0 ] || return 0
+  [ "$(id -u)" -eq 0 ] || return 0
+  local d bad=()
+  for d in "$@"; do
+    [ -n "$d" ] || continue
+    session_can_write "$d" || bad+=("$d")
+  done
+  [ ${#bad[@]} -gt 0 ] || return 0
+  warn "this session runs as uid $SATCHEL_UID, but these directories are not writable by it:"
+  for d in "${bad[@]}"; do warn "  $d"; done
+  warn "the agent will be able to read but not edit them. Fix with one of:"
+  warn "  chown -R $SATCHEL_UID:$SATCHEL_GID ${bad[0]}    (recommended)"
+  warn "  satchel settings SATCHEL_UID 0 --local          (run the session as root)"
+  warn "  satchel --host claude                           (Host Session, no sandbox)"
+  return 0
 }
 
 # --with mounts extra project directories into the session, for work that
@@ -285,18 +342,25 @@ cmd_session() {
   # loaded moments later for the session — a misleading startup failure.
   # Install cleanup first so Ctrl-C during a passphrase prompt cannot leave a
   # temporary agent behind.
-  trap 'stop_temporary_ssh_agent' EXIT
-  ssh_preflight || return $?
+  SESSION_STAMP=""
+  trap 'stop_temporary_ssh_agent; [ -z "$SESSION_STAMP" ] || rm -f "$SESSION_STAMP"' EXIT
+  # Catch INT from here rather than just before the engine runs. Startup does
+  # real work — pulling, repairing the Sync Repo, chowning agent homes — and a
+  # Ctrl-C landing there used to kill Satchel outright. A caught handler (not
+  # an ignored one) still lets children see the signal, so ssh-add passphrase
+  # prompts and the interactive agent behave exactly as before.
+  trap ':' INT
+  ssh_preflight "$agent" || return $?
+  # The EXIT trap stays installed either way: it also removes the transcript
+  # stamp, and stop_temporary_ssh_agent is a no-op when no agent was started.
   local temporary_agent=0
-  if [ -n "$TEMP_SSH_AGENT_PID" ]; then
-    temporary_agent=1
-  else
-    trap - EXIT
-  fi
+  [ -z "$TEMP_SSH_AGENT_PID" ] || temporary_agent=1
 
   quiet_pull || return $?
   if sync_ready; then
-    validate_sync_state
+    # Soft validation: a malformed or conflicted Sync Repo degrades syncing for
+    # this run instead of refusing to start the agent at all.
+    validate_sync_state_soft
     ensure_skill_library
     repair_skill_library 0
   fi
@@ -332,6 +396,13 @@ cmd_session() {
   # Compose exports Codex's short-lived MCP variables and may create missing
   # shared mount roots. Do it before the final ownership boundary.
   compose_run_args "$agent" "$home" "$project"
+  # Git refuses to touch a repository owned by another user, which is the
+  # normal case on a root-run host. Declare the mounted roots trusted, and say
+  # plainly if the agent will not be able to write them.
+  if [ "$HOST_MODE" -eq 0 ]; then
+    declare_session_safe_directories "$home" "$project" ${WITH_DIRS[@]+"${WITH_DIRS[@]}"}
+    warn_unwritable_mounts "$project" ${WITH_DIRS[@]+"${WITH_DIRS[@]}"}
+  fi
   # This is the final host-side write boundary before the agent starts.
   # Root-run hosts may have just materialized config, memory, and mount roots.
   fix_home_ownership "$home"
@@ -342,12 +413,14 @@ cmd_session() {
   # A handoff is only worth writing if a conversation actually happened —
   # detected as new transcript files in the agent home during the session.
   # Trivial runs (--version, instant quits) must not overwrite a good handoff.
-  local tdir stamp
+  # SESSION_STAMP, not a local: the EXIT trap removes it if Satchel dies before
+  # reaching normal cleanup.
+  local tdir
   case "$agent" in
     claude) tdir="$home/.claude/projects" ;;
     codex)  tdir="$home/.codex/sessions" ;;
   esac
-  stamp="$(mktemp)"
+  SESSION_STAMP="$(mktemp)"
 
   # Codex's own sandbox (bubblewrap) cannot create namespaces inside the
   # container, and the container IS the sandbox here — so codex runs with its
@@ -358,11 +431,10 @@ cmd_session() {
     launch=(codex -c 'sandbox_mode="danger-full-access"' -c check_for_update_on_startup=false)
   fi
 
-  # Keep Satchel itself alive through Ctrl-C: a caught trap resets to the
-  # default in the external container engine, so the interactive agent still
-  # receives SIGINT normally.
+  # INT is already caught (installed before startup work). A caught trap resets
+  # to the default in the external container engine, so the interactive agent
+  # still receives SIGINT normally.
   local rc=0
-  trap ':' INT
   "$(engine)" run --rm "${tty[@]}" "${RUN_ARGS[@]}" "$IMAGE" "${launch[@]}" "$@" || rc=$?
   clear_codex_mcp_env
   # After the interactive engine exits, ignore INT instead of merely catching
@@ -380,7 +452,7 @@ cmd_session() {
 
   if sync_ready; then
     if [ -z "${SATCHEL_NO_HANDOFF:-}" ] \
-       && [ -d "$tdir" ] && [ -n "$(find "$tdir" -type f -newer "$stamp" -print -quit 2>/dev/null)" ]; then
+       && [ -d "$tdir" ] && [ -n "$(find "$tdir" -type f -newer "$SESSION_STAMP" -print -quit 2>/dev/null)" ]; then
       # Re-scan because a session may have cloned or initialized repositories.
       # Unknown repos are offered only if handoff analysis identifies
       # substantive work in them; ordinary directories never prompt.
@@ -392,13 +464,11 @@ cmd_session() {
     run_isolated_task protect finalize_session_sync "$slug" \
       || warn "post-session validation or sync did not complete; run 'satchel sync' to retry"
   fi
-  rm -f "$stamp"
+  rm -f "$SESSION_STAMP"; SESSION_STAMP=""
   # Keep the temporary agent through the host-side Sync Repo push, then tear
   # it down. The handoff worker never receives its socket.
-  if [ "$temporary_agent" -eq 1 ]; then
-    stop_temporary_ssh_agent
-    trap - EXIT
-  fi
+  [ "$temporary_agent" -eq 0 ] || stop_temporary_ssh_agent
+  trap - EXIT
   trap - INT
   return "$rc"
 }

@@ -329,10 +329,17 @@ grep -Fq "cleanup-engine:$fake_engine" "$events"
 # A cleanup program that installs its own INT handler still survives terminal
 # Ctrl-C because the runner places it outside Satchel's foreground process
 # group. This models both Docker ownership repair and Git Sync Repo writes.
+# The task waits for the test to release it rather than for a fixed sleep, so
+# the signals always land while it is genuinely running. A timing-based version
+# races: if the task finishes first the process group is gone, 'kill' fails,
+# and 'set -e' ends the test with no output at all.
 interrupt_task() {
   trap 'printf "interrupted\n" > "$events.interrupt-result"; exit 99' INT
   : > "$events.interrupt-started"
-  sleep 0.2
+  for _ in $(seq 1 200); do
+    [ -f "$events.interrupt-release" ] && break
+    sleep 0.05
+  done
   printf 'complete\n' > "$events.interrupt-result"
 }
 case "$-" in *m*) test_had_monitor=1 ;; *) test_had_monitor=0 ;; esac
@@ -345,16 +352,63 @@ set -m
   printf '%s\n' "$task_rc" > "$events.interrupt-rc"
 ) &
 interrupt_runner=$!
-for _ in 1 2 3 4 5 6 7 8 9 10; do
+for _ in $(seq 1 200); do
   [ -f "$events.interrupt-started" ] && break
   sleep 0.05
 done
+[ -f "$events.interrupt-started" ] || { printf 'FAIL: interrupt task never started\n' >&2; exit 1; }
 kill -INT -- "-$interrupt_runner"
 kill -INT -- "-$interrupt_runner"
 kill -INT -- "-$interrupt_runner"
+: > "$events.interrupt-release"
 wait "$interrupt_runner"
 [ "$test_had_monitor" -eq 1 ] || set +m
 [ "$(cat "$events.interrupt-rc")" = 0 ]
 grep -q '^complete$' "$events.interrupt-result"
+
+# On a root-run host (Unraid) the session runs as SATCHEL_UID while project
+# files belong to root. Git refuses to touch a repository owned by another
+# user, so every git command inside the session fails with "dubious ownership"
+# until the mounted roots are declared safe.
+safe_home="$tmp/safe-home"
+mkdir -p "$safe_home" "$tmp/work/extra"
+declare_session_safe_directories "$safe_home" "$tmp/work/app" "$tmp/work/extra"
+grep -Fq "$tmp/work/app" "$safe_home/.gitconfig"
+grep -Fq "$tmp/work/extra" "$safe_home/.gitconfig"
+# Rewritten every session start, so it must not accumulate duplicates.
+declare_session_safe_directories "$safe_home" "$tmp/work/app" "$tmp/work/extra"
+[ "$(grep -Fc "$tmp/work/app" "$safe_home/.gitconfig")" = 1 ]
+# An existing user gitconfig copied in at first run is preserved.
+printf '[user]\n\tname = someone\n' > "$tmp/pre-home-gitconfig"
+mkdir -p "$tmp/pre-home"; cp "$tmp/pre-home-gitconfig" "$tmp/pre-home/.gitconfig"
+declare_session_safe_directories "$tmp/pre-home" "$tmp/work/app"
+grep -q 'name = someone' "$tmp/pre-home/.gitconfig"
+grep -Fq "$tmp/work/app" "$tmp/pre-home/.gitconfig"
+
+# A project the session user cannot write is worth one clear sentence at
+# launch, instead of the agent discovering it one failed edit at a time.
+writable_dir="$tmp/work/app"
+chmod 755 "$writable_dir"
+saved_uid="$SATCHEL_UID"; saved_gid="$SATCHEL_GID"
+SATCHEL_UID="$(stat -c %u "$writable_dir")"; SATCHEL_GID="$(stat -c %g "$writable_dir")"
+session_can_write "$writable_dir"
+SATCHEL_UID=4242; SATCHEL_GID=4242
+! session_can_write "$writable_dir"          # not owner, not group, not world-writable
+chmod 777 "$writable_dir"
+session_can_write "$writable_dir"            # world-writable is enough
+chmod 755 "$writable_dir"
+
+# The warning itself only applies to root-run hosts in a sandboxed session.
+id() { case "${1:-}" in -u) printf '0' ;; *) command id "$@" ;; esac; }
+HOST_MODE=0
+unwritable_out="$(warn_unwritable_mounts "$writable_dir" 2>&1)"
+grep -q 'not writable by it' <<< "$unwritable_out"
+grep -Fq "chown -R 4242:4242 $writable_dir" <<< "$unwritable_out"
+HOST_MODE=1
+[ -z "$(warn_unwritable_mounts "$writable_dir" 2>&1)" ]   # Host Sessions run as root
+HOST_MODE=0
+unset -f id
+[ -z "$(warn_unwritable_mounts "$writable_dir" 2>&1)" ]   # non-root hosts never warn
+SATCHEL_UID="$saved_uid"; SATCHEL_GID="$saved_gid"
 
 printf 'ok: session boundaries, validation, and lifecycle\n'

@@ -19,6 +19,37 @@ validate_machine_state() {
   done < <(find -P "$SYNC_DIR/machines" -mindepth 1 -maxdepth 1 -print0)
 }
 
+# "Works on one machine, errors on the other" is usually not a Satchel bug: the
+# container image is built per machine from floating upstream tags, so two
+# machines legitimately run different agent versions. Publish what this machine
+# actually has so doctor can name the difference instead of leaving the user to
+# guess. Written from the build-time cache; no container starts here.
+machine_environment_file() { printf '%s/environment.json' "$(machine_dir)"; }
+
+publish_machine_environment() {
+  sync_ready || return 0
+  local dir f commit=""
+  dir="$(machine_dir)"; mkdir -p "$dir"
+  f="$(machine_environment_file)"
+  [ ! -f "$SCRIPT_SHA_FILE" ] || commit="$(tr -cd 'a-f0-9' < "$SCRIPT_SHA_FILE" | cut -c1-7)"
+  jq -n --arg v "$SATCHEL_VERSION" --arg c "$commit" \
+        --arg e "${ENGINE:-}" --arg a "$(cached_image_agents)" \
+    '{satchel: $v, commit: $c, engine: $e, agents: $a}' > "$f.tmp" \
+    && mv -f "$f.tmp" "$f"
+  rm -f "$f.tmp"
+  return 0
+}
+
+caravan_environments() { # prints "machine<TAB>satchel<TAB>commit<TAB>agents"
+  local f m
+  for f in "$SYNC_DIR"/machines/*/environment.json; do
+    [ -f "$f" ] || continue
+    m="$(basename "$(dirname "$f")")"
+    jq -r --arg m "$m" \
+      '[$m, (.satchel // "?"), (.commit // ""), (.agents // "")] | @tsv' "$f" 2>/dev/null || true
+  done
+}
+
 warn_machine_notes_size() {
   local notes words
   notes="$(baseline_notes_file)"

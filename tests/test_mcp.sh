@@ -26,6 +26,16 @@ printf '{"servers":{"bad":{"url":"https://example.test/\\"bad","auth":"none"}}}\
 printf '{"servers":{"bad":{"url":"https://example.test/\\nbad","auth":"none"}}}\n' > "$MCP_FILE"
 ! (validate_mcp_state 2>/dev/null)
 
+# The registry is synced, so a newer Satchel on another machine may add fields
+# this version does not know. Unknown keys are ignored; required ones are still
+# enforced, so a genuinely broken entry cannot slip through.
+printf '{"servers":{"ok":{"url":"https://example.test/mcp","auth":"none","timeout":30}},"version":2}\n' > "$MCP_FILE"
+validate_mcp_state
+printf '{"servers":{"ok":{"auth":"none"}}}\n' > "$MCP_FILE"
+! (validate_mcp_state 2>/dev/null)                       # url is still required
+printf '{"servers":{"ok":{"url":"https://example.test/mcp","auth":"basic"}}}\n' > "$MCP_FILE"
+! (validate_mcp_state 2>/dev/null)                       # auth is still constrained
+
 # A valid managed block is replaced while unrelated settings on both sides
 # remain intact.
 printf '{"servers":{"ok":{"url":"https://example.test/mcp","auth":"none"}}}\n' > "$MCP_FILE"

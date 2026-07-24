@@ -93,16 +93,17 @@ validate_project_state() {
   local registry project_dir id origin f
   registry="$(repository_registry_file)"
 
+  # Validate what Satchel reads, and ignore keys it does not know: a newer
+  # Satchel on another machine must be able to add a field without bricking
+  # every older machine in the caravan on its next command.
   jq -e '
     type == "object"
     and all(to_entries[];
       (.key | type == "string" and length > 0)
       and (.value | type == "object")
       and if .value.status == "tracked" then
-        ((.value | keys) == ["project", "status"])
-        and (.value.project | type == "string" and length > 0)
-      elif .value.status == "ignored" then
-        ((.value | keys) == ["status"])
+        (.value.project | type == "string" and length > 0)
+      elif .value.status == "ignored" then true
       else false end)
     and (([to_entries[] | select(.value.status == "tracked") | .value.project] | length)
       == ([to_entries[] | select(.value.status == "tracked") | .value.project] | unique | length))
@@ -137,7 +138,6 @@ validate_project_state() {
       and all(.paths | to_entries[];
         (.key | type == "string" and startswith("/"))
         and (.value | type == "object")
-        and ((.value | keys) == ["project"])
         and (.value.project | type == "string" and length > 0))
     ' "$f" >/dev/null || die "invalid machine Project cache: $f"
     while IFS= read -r id; do
@@ -197,6 +197,7 @@ path_overlaps_roots() {
 
 refresh_project_paths() { # discover/match repositories inside the explicit session roots
   local launch="$1" roots=() root path id identity actual f
+  sync_ready || return 0
   ensure_project_registry; ensure_repository_registry
   validate_project_state
   [ "$HOST_MODE" -eq 0 ] || return 0

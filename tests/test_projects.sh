@@ -320,6 +320,36 @@ printf '{"paths":{"/missing":{"project":"missing"}}}\n' \
 printf '{"paths":{}}\n' > "$SATCHEL_DIR/sync/machines/other/projects.json"
 validate_project_state
 
+# Forward compatibility. The registry is shared by every machine, so a newer
+# Satchel elsewhere in the caravan will eventually write a field this version
+# does not know. Exact-key validation turned that into a hard stop on EVERY
+# command here; validating only what Satchel reads keeps the older machine
+# working. Genuinely malformed entries must still be rejected.
+jq '.["example.com/newer"]={status:"ignored",lastSeen:"2026-01-01"}' "$registry" \
+  > "$registry.tmp" && mv "$registry.tmp" "$registry"
+jq '.["github.com/example/app"] += {note:"added by a newer satchel"}' "$registry" \
+  > "$registry.tmp" && mv "$registry.tmp" "$registry"
+validate_project_state
+[ "$(repository_decision example.com/newer)" = ignored ]
+[ "$(project_for_identity github.com/example/app)" = sample ]
+jq 'del(.["example.com/newer"]) | .["github.com/example/app"] |= del(.note)' "$registry" \
+  > "$registry.tmp" && mv "$registry.tmp" "$registry"
+
+jq '.["example.com/bad"]={status:"tracked"}' "$registry" \
+  > "$registry.tmp" && mv "$registry.tmp" "$registry"
+! (validate_project_state 2>/dev/null)     # tracked still requires a project id
+jq 'del(.["example.com/bad"])' "$registry" > "$registry.tmp" && mv "$registry.tmp" "$registry"
+jq '.["example.com/bad"]={status:"weird"}' "$registry" \
+  > "$registry.tmp" && mv "$registry.tmp" "$registry"
+! (validate_project_state 2>/dev/null)     # unknown status is still a hard error
+jq 'del(.["example.com/bad"])' "$registry" > "$registry.tmp" && mv "$registry.tmp" "$registry"
+
+printf '{"paths":{"/somewhere":{"project":"sample","seenAt":"2026-01-01"}}}\n' \
+  > "$SATCHEL_DIR/sync/machines/other/projects.json"
+validate_project_state
+printf '{"paths":{}}\n' > "$SATCHEL_DIR/sync/machines/other/projects.json"
+validate_project_state
+
 # Status keeps active Project IDs/origins visible but collapses ignored repos
 # unless the explicit detail flag is requested.
 status="$(cmd_status 2>/dev/null)"
@@ -372,24 +402,51 @@ mock_engine() { printf '## Goal\nIncomplete\n'; }
 generate_handoff claude sample "$tmp/work/app" >/dev/null 2>&1
 [ "$(git hash-object "$saved_handoff")" = "$saved_hash" ]
 
-# The runner itself ignores a late INT and lets its isolated writer finish.
+# Holding Ctrl-C to quit the agent keeps delivering INT to the whole foreground
+# process group well after the agent is gone. Cleanup must survive all of it.
+#
+# The signal goes to the process GROUP, which is what a terminal actually does.
+# Signalling only the runner pid cannot fail: Bash does not die from an INT
+# delivered to the shell while a foreground child runs, so that shape of test
+# passes even against a completely unprotected run_isolated_task.
+#
+# The storm runs across several consecutive tasks because the gap between them
+# is the exposed window: 'trap - INT' used to drop INT to its default for an
+# instant before the caller's handler was restored.
 int_writer() {
   : > "$HANDOFF_SIGNAL_DIR/int-started"
-  sleep 0.2
+  sleep 0.1
   printf 'complete\n'
 }
+# set -m here so the runner gets its own process group and can be signalled the
+# way a terminal signals one; the runner turns it back off to mirror Satchel.
+case "$-" in *m*) int_had_monitor=1 ;; *) int_had_monitor=0 ;; esac
+set -m
 (
+  set +m
+  trap '' INT                       # the disposition cmd_session cleanup runs under
+  : > "$HANDOFF_SIGNAL_DIR/int-ready"
   writer_rc=0
-  run_isolated_task cancellable "$HANDOFF_SIGNAL_DIR/int-out" "$HANDOFF_SIGNAL_DIR/int-err" int_writer || writer_rc=$?
+  for _ in 1 2 3 4 5; do
+    run_isolated_task cancellable "$HANDOFF_SIGNAL_DIR/int-out" "$HANDOFF_SIGNAL_DIR/int-err" int_writer || writer_rc=$?
+  done
   printf '%s\n' "$writer_rc" > "$HANDOFF_SIGNAL_DIR/int-rc"
+  printf 'survived\n' > "$HANDOFF_SIGNAL_DIR/int-survived"
 ) &
 int_runner=$!
-for _ in 1 2 3 4 5 6 7 8 9 10; do
-  [ -f "$HANDOFF_SIGNAL_DIR/int-started" ] && break
+for _ in $(seq 1 40); do
+  [ -f "$HANDOFF_SIGNAL_DIR/int-ready" ] && break
   sleep 0.05
 done
-kill -INT "$int_runner"
+( while kill -0 "$int_runner" 2>/dev/null; do
+    kill -INT -- "-$int_runner" 2>/dev/null || true
+  done ) >/dev/null 2>&1 &
+int_storm=$!
 wait "$int_runner"
+kill "$int_storm" 2>/dev/null || true
+wait "$int_storm" 2>/dev/null || true
+[ "$int_had_monitor" -eq 1 ] || set +m
+[ -f "$HANDOFF_SIGNAL_DIR/int-survived" ]
 [ "$(cat "$HANDOFF_SIGNAL_DIR/int-rc")" = 0 ]
 grep -q '^complete$' "$HANDOFF_SIGNAL_DIR/int-out"
 

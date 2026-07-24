@@ -17,14 +17,15 @@ mcp_url_valid() {
 
 validate_mcp_state() {
   [ -f "$MCP_FILE" ] || return 0
+  # Required fields are checked; unknown ones are ignored so a newer Satchel
+  # elsewhere in the caravan cannot brick this machine (see validate_project_state).
   jq -e '
     type == "object"
-    and (keys == ["servers"])
+    and has("servers")
     and (.servers | type == "object")
     and all(.servers | to_entries[];
       (.key | test("^[A-Za-z0-9_-]+$"))
       and (.value | type == "object")
-      and ((.value | keys) == ["auth", "url"])
       and (.value.url | type == "string"
         and length > 0
         and (explode | all(. >= 32 and . != 34 and . != 92 and . != 127)))

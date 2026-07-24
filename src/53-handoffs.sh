@@ -149,13 +149,27 @@ resolve_candidate_handoffs() { # resolve candidate scopes after substantive work
   done <<< "$body"
 }
 
+# Cancelling or timing out the handoff writer kills the engine CLI, but --rm is
+# handled daemon-side: without a known name the container keeps running (and
+# keeps spending tokens) after Satchel has moved on. Name it so it can be
+# removed for real.
+HANDOFF_CONTAINER_NAME=""
+
+remove_handoff_container() {
+  [ -n "$HANDOFF_CONTAINER_NAME" ] || return 0
+  "$(engine)" rm -f "$HANDOFF_CONTAINER_NAME" >/dev/null 2>&1 || true
+  return 0
+}
+
 compose_handoff_run_args() { # compose_handoff_run_args <agent> <home> <project>
   local agent="$1" home="$2" project="$3"
+  HANDOFF_CONTAINER_NAME="satchel-handoff-$$"
   # The handoff worker resumes the transcript and writes its answer to stdout.
   # It does not need the project, Sync Repo, skills, machine notes, clipboard,
   # SSH agent, or Host Session access. Keep its only durable mount read-write:
   # both CLIs store the resumed conversation in their agent home.
   RUN_ARGS=(--init --label "$MANAGED_CONTAINER_LABEL"
+    --name "$HANDOFF_CONTAINER_NAME"
     -e HOME=/home/satchel -e "TERM=${TERM:-xterm-256color}"
     -e DISABLE_AUTOUPDATER=1
     -v "$home:/home/satchel"
@@ -213,9 +227,12 @@ run_isolated_task() { # protect <command...> | cancellable <stdout-file> <stderr
     rc=131
   fi
   [ "$had_monitor" -eq 1 ] || set +m
-  trap - INT QUIT
-  [ -z "$old_int" ] || eval "$old_int"
-  [ -z "$old_quit" ] || eval "$old_quit"
+  # Restore each handler directly rather than clearing first. 'trap - INT'
+  # drops INT to its default for the instant before the caller's own handler is
+  # reinstalled, and a held Ctrl-C that lands in that window kills Satchel
+  # mid-cleanup — losing the handoff this function exists to protect.
+  if [ -n "$old_int" ];  then eval "$old_int";  else trap - INT;  fi
+  if [ -n "$old_quit" ]; then eval "$old_quit"; else trap - QUIT; fi
   return "$rc"
 }
 
@@ -298,6 +315,9 @@ Start tracked notes with exactly '=== project: <id> ===', candidate notes with e
   bodyf="$(mktemp)"
   run_isolated_task cancellable "$bodyf" "$errf" \
     timeout 240 "$(engine)" run --rm "${RUN_ARGS[@]}" "$IMAGE" "${cmd[@]}" || rc=$?
+  # A skipped or timed-out writer leaves the container behind; killing the CLI
+  # does not stop it. Reclaim the name before any retry reuses it.
+  [ "$rc" -eq 0 ] || remove_handoff_container
   body="$(<"$bodyf")"
   if [ "$rc" -eq 131 ]; then
     rm -f "$errf" "$bodyf"
@@ -320,6 +340,7 @@ Start tracked notes with exactly '=== project: <id> ===', candidate notes with e
       rc=0
       run_isolated_task cancellable "$bodyf" "$errf" \
         timeout 240 "$(engine)" run --rm "${RUN_ARGS[@]}" "$IMAGE" "${base_cmd[@]}" || rc=$?
+      [ "$rc" -eq 0 ] || remove_handoff_container
       body="$(<"$bodyf")"
       if [ "$rc" -eq 131 ]; then
         rm -f "$errf" "$bodyf"
