@@ -523,14 +523,17 @@ load_config() {
 
 sync_ready() { [ -n "$SYNC_URL" ] && [ -d "$SYNC_DIR/.git" ]; }
 
-engine() {
-  if [ -z "$ENGINE" ]; then
-    if [ -n "${SATCHEL_ENGINE:-}" ]; then ENGINE="$SATCHEL_ENGINE"
-    elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then ENGINE=docker
-    elif command -v podman >/dev/null 2>&1; then ENGINE=podman
-    else die "neither docker nor podman is available"
-    fi
+select_engine() {
+  [ -z "$ENGINE" ] || return 0
+  if [ -n "${SATCHEL_ENGINE:-}" ]; then ENGINE="$SATCHEL_ENGINE"
+  elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then ENGINE=docker
+  elif command -v podman >/dev/null 2>&1; then ENGINE=podman
+  else die "neither docker nor podman is available"
   fi
+}
+
+engine() {
+  select_engine
   printf '%s' "$ENGINE"
 }
 
@@ -1944,48 +1947,40 @@ compose_handoff_run_args() { # compose_handoff_run_args <agent> <home> <project>
   return 0
 }
 
-run_interrupt_isolated() { # run_interrupt_isolated <command...>
-  local task_pid="" rc=0 had_monitor=0 old_int old_quit
+run_isolated_task() { # protect <command...> | cancellable <stdout-file> <stderr-file> <command...>
+  local mode="$1"; shift
+  local outf="" errf="" task_pid="" rc=0 cancelled=0 had_monitor=0 old_int old_quit
+  case "$mode" in
+    protect) ;;
+    cancellable) outf="$1"; errf="$2"; shift 2 ;;
+    *) return 2 ;;
+  esac
   old_int="$(trap -p INT)"
   old_quit="$(trap -p QUIT)"
   case "$-" in *m*) had_monitor=1 ;; esac
 
   # Some programs install their own signal handlers even when Satchel ignores
-  # SIGINT. Run noninteractive cleanup in another process group so terminal
-  # Ctrl-C/QUIT signals keep reaching Satchel but cannot corrupt durable work.
-  trap '' INT QUIT
+  # SIGINT. Every task gets a separate process group so terminal Ctrl-C stays
+  # with Satchel. Protected cleanup ignores Ctrl-\ too; a cancellable handoff
+  # uses it to terminate the isolated task group and returns status 131.
+  trap '' INT
+  case "$mode" in
+    protect) trap '' QUIT ;;
+    cancellable)
+      trap 'cancelled=1; [ -z "$task_pid" ] || kill -TERM -- "-$task_pid" 2>/dev/null || true' QUIT
+      ;;
+  esac
   set -m
-  "$@" &
+  if [ "$mode" = cancellable ]; then
+    "$@" >"$outf" 2>"$errf" &
+  else
+    "$@" &
+  fi
   task_pid=$!
   wait "$task_pid" || rc=$?
-  [ "$had_monitor" -eq 1 ] || set +m
-  trap - INT QUIT
-  [ -z "$old_int" ] || eval "$old_int"
-  [ -z "$old_quit" ] || eval "$old_quit"
-  return "$rc"
-}
-
-run_handoff_writer() { # run_handoff_writer <stdout-file> <stderr-file> <command...>
-  local outf="$1" errf="$2"; shift 2
-  local writer_pid="" rc=0 quit=0 had_monitor=0 old_int old_quit
-  old_int="$(trap -p INT)"
-  old_quit="$(trap -p QUIT)"
-  case "$-" in *m*) had_monitor=1 ;; esac
-
-  # Job control gives the writer its own process group. The terminal can then
-  # keep delivering a held Ctrl-C to Satchel without also interrupting the
-  # container engine. Ctrl-\ reaches this foreground shell; its handler
-  # terminates the isolated writer group and records an intentional skip.
-  trap '' INT
-  trap 'quit=1; [ -z "$writer_pid" ] || kill -TERM -- "-$writer_pid" 2>/dev/null || true' QUIT
-  set -m
-  "$@" >"$outf" 2>"$errf" &
-  writer_pid=$!
-  wait "$writer_pid" || rc=$?
-  if [ "$quit" -eq 1 ]; then
-    # The signal handler can interrupt wait before the writer has fully
-    # exited. Reap it before restoring normal terminal signal behavior.
-    wait "$writer_pid" 2>/dev/null || true
+  if [ "$cancelled" -eq 1 ]; then
+    # QUIT can interrupt wait before the task group has fully exited.
+    wait "$task_pid" 2>/dev/null || true
     rc=131
   fi
   [ "$had_monitor" -eq 1 ] || set +m
@@ -2072,7 +2067,7 @@ Start tracked notes with exactly '=== project: <id> ===', candidate notes with e
   local body="" rc=0 errf bodyf
   errf="$(mktemp)"
   bodyf="$(mktemp)"
-  run_handoff_writer "$bodyf" "$errf" \
+  run_isolated_task cancellable "$bodyf" "$errf" \
     timeout 240 "$(engine)" run --rm "${RUN_ARGS[@]}" "$IMAGE" "${cmd[@]}" || rc=$?
   body="$(<"$bodyf")"
   if [ "$rc" -eq 131 ]; then
@@ -2094,7 +2089,7 @@ Start tracked notes with exactly '=== project: <id> ===', candidate notes with e
     if [ -n "$model" ]; then
       warn "handoff model '$model' failed — retrying with the agent's default (fix with: satchel settings $setting <model>)"
       rc=0
-      run_handoff_writer "$bodyf" "$errf" \
+      run_isolated_task cancellable "$bodyf" "$errf" \
         timeout 240 "$(engine)" run --rm "${RUN_ARGS[@]}" "$IMAGE" "${base_cmd[@]}" || rc=$?
       body="$(<"$bodyf")"
       if [ "$rc" -eq 131 ]; then
@@ -2126,13 +2121,13 @@ Start tracked notes with exactly '=== project: <id> ===', candidate notes with e
       body="$RESOLVED_HANDOFF_BODY"; ids+="$RESOLVED_PROJECT_IDS"
     fi
     savedf="$(mktemp)"
-    run_interrupt_isolated file_multi_handoffs "$now" "$ids" "$body" > "$savedf"
+    run_isolated_task protect file_multi_handoffs "$now" "$ids" "$body" > "$savedf"
     saved="$(<"$savedf")"
     rm -f "$savedf"
     [ "$saved" -gt 0 ] \
       || warn "handoff attribution was incomplete — keeping the previous handoff"
   else
-    run_interrupt_isolated file_handoff "$slug" "$now" "$body"
+    run_isolated_task protect file_handoff "$slug" "$now" "$body"
   fi
   return 0
 }
@@ -2790,11 +2785,9 @@ cmd_session() {
   project="$(readlink -f "$PWD" 2>/dev/null)" || die "could not resolve session directory $PWD"
   session_mount_guard "$agent" "$project"
   with_dirs_guard
-  # Resolve the engine in this shell before any $(engine) call can put its
-  # ENGINE assignment in a disposable command-substitution subshell. Cleanup
-  # must keep using the selected binary even if a force-exited Docker CLI makes
-  # a fresh `docker info` probe fail briefly after the interactive session.
-  engine >/dev/null
+  # Keep one engine choice for the full lifecycle. Cleanup must not re-probe
+  # after a force-exited Docker CLI makes `docker info` fail briefly.
+  select_engine
   ensure_image
   require_supported_engine_mounts
   home="$HOMES_DIR/$agent"
@@ -2893,7 +2886,7 @@ cmd_session() {
   # read-write mounts get the same repair on every engine/session mode:
   # root-run hosts need it before safe sessions, and Docker Host Sessions can
   # otherwise leave root-owned skills or machine knowledge behind.
-  run_interrupt_isolated prepare_post_session_state "$home" \
+  run_isolated_task protect prepare_post_session_state "$home" \
     || warn "post-session ownership preparation did not complete"
 
   if sync_ready; then
@@ -2907,7 +2900,7 @@ cmd_session() {
       generate_handoff "$agent" "$slug" "$project"
       slug="$(project_for_path "$project")"
     fi
-    run_interrupt_isolated finalize_session_sync "$slug" \
+    run_isolated_task protect finalize_session_sync "$slug" \
       || warn "post-session validation or sync did not complete; run 'satchel sync' to retry"
   fi
   rm -f "$stamp"
@@ -3008,7 +3001,7 @@ ssh_key_hint() {
 }
 
 cmd_init() {
-  need_cmd git; need_cmd jq; engine >/dev/null
+  need_cmd git; need_cmd jq; select_engine
   mkdir -p "$SATCHEL_DIR" && chmod 700 "$SATCHEL_DIR"
 
   local name url existing_url was_initialized=0

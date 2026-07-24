@@ -266,11 +266,9 @@ cmd_session() {
   project="$(readlink -f "$PWD" 2>/dev/null)" || die "could not resolve session directory $PWD"
   session_mount_guard "$agent" "$project"
   with_dirs_guard
-  # Resolve the engine in this shell before any $(engine) call can put its
-  # ENGINE assignment in a disposable command-substitution subshell. Cleanup
-  # must keep using the selected binary even if a force-exited Docker CLI makes
-  # a fresh `docker info` probe fail briefly after the interactive session.
-  engine >/dev/null
+  # Keep one engine choice for the full lifecycle. Cleanup must not re-probe
+  # after a force-exited Docker CLI makes `docker info` fail briefly.
+  select_engine
   ensure_image
   require_supported_engine_mounts
   home="$HOMES_DIR/$agent"
@@ -369,7 +367,7 @@ cmd_session() {
   # read-write mounts get the same repair on every engine/session mode:
   # root-run hosts need it before safe sessions, and Docker Host Sessions can
   # otherwise leave root-owned skills or machine knowledge behind.
-  run_interrupt_isolated prepare_post_session_state "$home" \
+  run_isolated_task protect prepare_post_session_state "$home" \
     || warn "post-session ownership preparation did not complete"
 
   if sync_ready; then
@@ -383,7 +381,7 @@ cmd_session() {
       generate_handoff "$agent" "$slug" "$project"
       slug="$(project_for_path "$project")"
     fi
-    run_interrupt_isolated finalize_session_sync "$slug" \
+    run_isolated_task protect finalize_session_sync "$slug" \
       || warn "post-session validation or sync did not complete; run 'satchel sync' to retry"
   fi
   rm -f "$stamp"

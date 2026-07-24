@@ -176,48 +176,40 @@ compose_handoff_run_args() { # compose_handoff_run_args <agent> <home> <project>
   return 0
 }
 
-run_interrupt_isolated() { # run_interrupt_isolated <command...>
-  local task_pid="" rc=0 had_monitor=0 old_int old_quit
+run_isolated_task() { # protect <command...> | cancellable <stdout-file> <stderr-file> <command...>
+  local mode="$1"; shift
+  local outf="" errf="" task_pid="" rc=0 cancelled=0 had_monitor=0 old_int old_quit
+  case "$mode" in
+    protect) ;;
+    cancellable) outf="$1"; errf="$2"; shift 2 ;;
+    *) return 2 ;;
+  esac
   old_int="$(trap -p INT)"
   old_quit="$(trap -p QUIT)"
   case "$-" in *m*) had_monitor=1 ;; esac
 
   # Some programs install their own signal handlers even when Satchel ignores
-  # SIGINT. Run noninteractive cleanup in another process group so terminal
-  # Ctrl-C/QUIT signals keep reaching Satchel but cannot corrupt durable work.
-  trap '' INT QUIT
+  # SIGINT. Every task gets a separate process group so terminal Ctrl-C stays
+  # with Satchel. Protected cleanup ignores Ctrl-\ too; a cancellable handoff
+  # uses it to terminate the isolated task group and returns status 131.
+  trap '' INT
+  case "$mode" in
+    protect) trap '' QUIT ;;
+    cancellable)
+      trap 'cancelled=1; [ -z "$task_pid" ] || kill -TERM -- "-$task_pid" 2>/dev/null || true' QUIT
+      ;;
+  esac
   set -m
-  "$@" &
+  if [ "$mode" = cancellable ]; then
+    "$@" >"$outf" 2>"$errf" &
+  else
+    "$@" &
+  fi
   task_pid=$!
   wait "$task_pid" || rc=$?
-  [ "$had_monitor" -eq 1 ] || set +m
-  trap - INT QUIT
-  [ -z "$old_int" ] || eval "$old_int"
-  [ -z "$old_quit" ] || eval "$old_quit"
-  return "$rc"
-}
-
-run_handoff_writer() { # run_handoff_writer <stdout-file> <stderr-file> <command...>
-  local outf="$1" errf="$2"; shift 2
-  local writer_pid="" rc=0 quit=0 had_monitor=0 old_int old_quit
-  old_int="$(trap -p INT)"
-  old_quit="$(trap -p QUIT)"
-  case "$-" in *m*) had_monitor=1 ;; esac
-
-  # Job control gives the writer its own process group. The terminal can then
-  # keep delivering a held Ctrl-C to Satchel without also interrupting the
-  # container engine. Ctrl-\ reaches this foreground shell; its handler
-  # terminates the isolated writer group and records an intentional skip.
-  trap '' INT
-  trap 'quit=1; [ -z "$writer_pid" ] || kill -TERM -- "-$writer_pid" 2>/dev/null || true' QUIT
-  set -m
-  "$@" >"$outf" 2>"$errf" &
-  writer_pid=$!
-  wait "$writer_pid" || rc=$?
-  if [ "$quit" -eq 1 ]; then
-    # The signal handler can interrupt wait before the writer has fully
-    # exited. Reap it before restoring normal terminal signal behavior.
-    wait "$writer_pid" 2>/dev/null || true
+  if [ "$cancelled" -eq 1 ]; then
+    # QUIT can interrupt wait before the task group has fully exited.
+    wait "$task_pid" 2>/dev/null || true
     rc=131
   fi
   [ "$had_monitor" -eq 1 ] || set +m
@@ -304,7 +296,7 @@ Start tracked notes with exactly '=== project: <id> ===', candidate notes with e
   local body="" rc=0 errf bodyf
   errf="$(mktemp)"
   bodyf="$(mktemp)"
-  run_handoff_writer "$bodyf" "$errf" \
+  run_isolated_task cancellable "$bodyf" "$errf" \
     timeout 240 "$(engine)" run --rm "${RUN_ARGS[@]}" "$IMAGE" "${cmd[@]}" || rc=$?
   body="$(<"$bodyf")"
   if [ "$rc" -eq 131 ]; then
@@ -326,7 +318,7 @@ Start tracked notes with exactly '=== project: <id> ===', candidate notes with e
     if [ -n "$model" ]; then
       warn "handoff model '$model' failed — retrying with the agent's default (fix with: satchel settings $setting <model>)"
       rc=0
-      run_handoff_writer "$bodyf" "$errf" \
+      run_isolated_task cancellable "$bodyf" "$errf" \
         timeout 240 "$(engine)" run --rm "${RUN_ARGS[@]}" "$IMAGE" "${base_cmd[@]}" || rc=$?
       body="$(<"$bodyf")"
       if [ "$rc" -eq 131 ]; then
@@ -358,13 +350,13 @@ Start tracked notes with exactly '=== project: <id> ===', candidate notes with e
       body="$RESOLVED_HANDOFF_BODY"; ids+="$RESOLVED_PROJECT_IDS"
     fi
     savedf="$(mktemp)"
-    run_interrupt_isolated file_multi_handoffs "$now" "$ids" "$body" > "$savedf"
+    run_isolated_task protect file_multi_handoffs "$now" "$ids" "$body" > "$savedf"
     saved="$(<"$savedf")"
     rm -f "$savedf"
     [ "$saved" -gt 0 ] \
       || warn "handoff attribution was incomplete — keeping the previous handoff"
   else
-    run_interrupt_isolated file_handoff "$slug" "$now" "$body"
+    run_isolated_task protect file_handoff "$slug" "$now" "$body"
   fi
   return 0
 }

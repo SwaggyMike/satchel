@@ -20,14 +20,17 @@ load_config() {
 
 sync_ready() { [ -n "$SYNC_URL" ] && [ -d "$SYNC_DIR/.git" ]; }
 
-engine() {
-  if [ -z "$ENGINE" ]; then
-    if [ -n "${SATCHEL_ENGINE:-}" ]; then ENGINE="$SATCHEL_ENGINE"
-    elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then ENGINE=docker
-    elif command -v podman >/dev/null 2>&1; then ENGINE=podman
-    else die "neither docker nor podman is available"
-    fi
+select_engine() {
+  [ -z "$ENGINE" ] || return 0
+  if [ -n "${SATCHEL_ENGINE:-}" ]; then ENGINE="$SATCHEL_ENGINE"
+  elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then ENGINE=docker
+  elif command -v podman >/dev/null 2>&1; then ENGINE=podman
+  else die "neither docker nor podman is available"
   fi
+}
+
+engine() {
+  select_engine
   printf '%s' "$ENGINE"
 }
 

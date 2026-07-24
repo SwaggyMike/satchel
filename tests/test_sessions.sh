@@ -207,11 +207,14 @@ fix_synced_write_ownership() {
 # Model a Docker probe that works before the interactive session but fails
 # briefly after its CLI was force-exited. Engine selection must have been
 # cached in this shell before then, rather than repeated inside $(engine).
-engine() {
+select_engine() {
   if [ -z "$ENGINE" ]; then
     [ ! -f "$events.session-ended" ] || return 1
     ENGINE="$fake_engine"
   fi
+}
+engine() {
+  select_engine
   printf '%s' "$ENGINE"
 }
 generate_handoff() { printf 'handoff\n' >> "$events"; }
@@ -293,7 +296,7 @@ set -m
   set +m
   trap '' INT
   task_rc=0
-  run_interrupt_isolated interrupt_task || task_rc=$?
+  run_isolated_task protect interrupt_task || task_rc=$?
   printf '%s\n' "$task_rc" > "$events.interrupt-rc"
 ) &
 interrupt_runner=$!

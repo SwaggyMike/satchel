@@ -86,7 +86,7 @@ ssh_key_hint() {
 }
 
 cmd_init() {
-  need_cmd git; need_cmd jq; engine >/dev/null
+  need_cmd git; need_cmd jq; select_engine
   mkdir -p "$SATCHEL_DIR" && chmod 700 "$SATCHEL_DIR"
 
   local name url existing_url was_initialized=0

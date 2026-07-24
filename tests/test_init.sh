@@ -45,6 +45,7 @@ git init -q --bare "$origin"
 mkdir -p "$SYNC_DIR"
 printf 'keep me\n' > "$SYNC_DIR/old-state"
 engine() { printf 'test-engine'; }
+select_engine() { ENGINE=test-engine; }
 cmd_image() { :; }
 sync_machine_registration() { :; }
 offer_baseline_refresh() { :; }

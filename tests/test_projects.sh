@@ -374,7 +374,7 @@ int_writer() {
 }
 (
   writer_rc=0
-  run_handoff_writer "$HANDOFF_SIGNAL_DIR/int-out" "$HANDOFF_SIGNAL_DIR/int-err" int_writer || writer_rc=$?
+  run_isolated_task cancellable "$HANDOFF_SIGNAL_DIR/int-out" "$HANDOFF_SIGNAL_DIR/int-err" int_writer || writer_rc=$?
   printf '%s\n' "$writer_rc" > "$HANDOFF_SIGNAL_DIR/int-rc"
 ) &
 int_runner=$!
@@ -394,7 +394,7 @@ quit_writer() {
 }
 (
   writer_rc=0
-  run_handoff_writer "$HANDOFF_SIGNAL_DIR/quit-out" "$HANDOFF_SIGNAL_DIR/quit-err" quit_writer || writer_rc=$?
+  run_isolated_task cancellable "$HANDOFF_SIGNAL_DIR/quit-out" "$HANDOFF_SIGNAL_DIR/quit-err" quit_writer || writer_rc=$?
   printf '%s\n' "$writer_rc" > "$HANDOFF_SIGNAL_DIR/quit-rc"
 ) &
 quit_runner=$!
