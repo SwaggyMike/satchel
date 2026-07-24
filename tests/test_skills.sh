@@ -74,23 +74,29 @@ printf '%s\n' '---' 'name: escape' 'description: escape' '---' \
   > "$SATCHEL_DIR/sync/skills/shared/escape/SKILL.md"
 printf '%s\n' '---' 'name: hidden' 'description: hidden' '---' \
   > "$SATCHEL_DIR/sync/skills/shared/.hidden/SKILL.md"
+printf '{"installer":"example"}\n' \
+  > "$SATCHEL_DIR/sync/skills/shared/installer-state.json"
 ln -s "$tmp/outside" "$SATCHEL_DIR/sync/skills/shared/escape/outside"
 printf 'generated\n' > "$SATCHEL_DIR/sync/skills/shared/.system/generated/runtime"
 rm -f "$SATCHEL_DIR/sync/skills/shared/stable/SKILL.md"
 printf '{broken\n' > "$SATCHEL_DIR/sync/skills/shared/skills-lock.json"
 
-repair_skill_library 1 >/dev/null 2>&1
+repair_output="$(repair_skill_library 1 2>&1)"
 [ -f "$SATCHEL_DIR/sync/skills/shared/good/SKILL.md" ]
 [ -f "$SATCHEL_DIR/sync/skills/shared/stable/SKILL.md" ]
 [ ! -e "$SATCHEL_DIR/sync/skills/shared/missing" ]
 [ ! -e "$SATCHEL_DIR/sync/skills/shared/nested" ]
 [ ! -e "$SATCHEL_DIR/sync/skills/shared/escape" ]
 [ ! -e "$SATCHEL_DIR/sync/skills/shared/.hidden" ]
+[ ! -e "$SATCHEL_DIR/sync/skills/shared/installer-state.json" ]
 [ "$(jq -r '.skills.stable.source' "$SATCHEL_DIR/sync/skills/shared/skills-lock.json")" = example/stable ]
 [ -n "$(find "$SKILL_QUARANTINE_DIR" -mindepth 1 -maxdepth 1 -name '*--skills-lock.json' -print -quit)" ]
-[ "$(find "$SKILL_QUARANTINE_DIR" -mindepth 1 -maxdepth 1 | wc -l)" = 6 ]
+[ -n "$(find "$SKILL_QUARANTINE_DIR" -mindepth 1 -maxdepth 1 -name '*--installer-state.json' -print -quit)" ]
+grep -q "unexpected Skill Library file 'installer-state.json' was quarantined; it may be installer metadata rather than a skill" \
+  <<< "$repair_output"
+[ "$(find "$SKILL_QUARANTINE_DIR" -mindepth 1 -maxdepth 1 | wc -l)" = 7 ]
 ! git -C "$SATCHEL_DIR/sync" status --short | grep -q 'skills/shared/.system'
-grep -q 'quarantined locally: 6' <(cmd_status 2>/dev/null)
+grep -q 'quarantined locally: 7' <(cmd_status 2>/dev/null)
 printf '{"skills":{"stable":{"source":"example/stable"},"good":{"source":"example/good"}}}\n' \
   > "$SATCHEL_DIR/sync/skills/shared/skills-lock.json"
 skill_changes="$(report_skill_changes 2>&1)"

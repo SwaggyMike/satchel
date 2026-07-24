@@ -1468,8 +1468,11 @@ skill_validation_error() { # skill_validation_error <path> → prints reason
 }
 
 quarantine_skill_path() { # quarantine_skill_path <path> <reason> → prints destination
-  local path="$1" reason="$2" name now out n=2
+  local path="$1" reason="$2" name now out n=2 unexpected_file=0
   name="$(basename "$path")"
+  if [ "$name" != skills-lock.json ] && [ -f "$path" ] && [ ! -L "$path" ]; then
+    unexpected_file=1
+  fi
   now="$(date -u +%Y%m%dT%H%M%SZ)"
   mkdir -p "$SKILL_QUARANTINE_DIR"
   out="$SKILL_QUARANTINE_DIR/$now--$name"
@@ -1477,7 +1480,11 @@ quarantine_skill_path() { # quarantine_skill_path <path> <reason> → prints des
     out="$SKILL_QUARANTINE_DIR/$now--$name-$n"; n=$((n + 1))
   done
   mv -- "$path" "$out"
-  warn "Skill Library entry '$name' was quarantined: $reason"
+  if [ "$unexpected_file" -eq 1 ]; then
+    warn "unexpected Skill Library file '$name' was quarantined; it may be installer metadata rather than a skill: $reason"
+  else
+    warn "Skill Library entry '$name' was quarantined: $reason"
+  fi
   warn "preserved at $out (local only; not synced)"
   printf '%s' "$out"
 }
