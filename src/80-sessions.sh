@@ -101,7 +101,7 @@ compose_run_args() { # compose_run_args <agent> <home> <project>
     # the host's — the host's own init reaps zombies instead.
     RUN_ARGS+=(--privileged --pid=host --network=host --user 0:0 -v /:/host)
   else
-    RUN_ARGS+=(--init --pid=private --user "$SATCHEL_UID:$SATCHEL_GID" --cap-drop ALL --security-opt no-new-privileges)
+    RUN_ARGS+=(--init --user "$SATCHEL_UID:$SATCHEL_GID" --cap-drop ALL --security-opt no-new-privileges)
     if selinux_active; then RUN_ARGS+=(--security-opt label=disable); fi
     # keep-id invents a passwd entry when SATCHEL_UID is absent from the image
   # (custom UIDs); template its home to the agent home so ssh agrees with

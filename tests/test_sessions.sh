@@ -74,8 +74,21 @@ args=" ${RUN_ARGS[*]} "
 [[ "$args" == *" SATCHEL_SESSION=1 "* ]]
 [[ "$args" == *" SATCHEL_SESSION_MODE=sandbox "* ]]
 [[ "$args" != *" SATCHEL_SESSION_MODE=host "* ]]
-[[ "$args" == *" --pid=private "* ]]
+[[ "$args" != *" --pid=private "* ]]
 [[ "$args" != *" --pid=host "* ]]
+docker_pid_like="$tmp/docker-pid-like"
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'for arg in "$@"; do' \
+  '  case "$arg" in' \
+  '    --pid=host|--pid=container:*) ;;' \
+  '    --pid=*) exit 64 ;;' \
+  '  esac' \
+  'done' \
+  'exit 0' \
+  > "$docker_pid_like"
+chmod +x "$docker_pid_like"
+"$docker_pid_like" run --rm "${RUN_ARGS[@]}" "$IMAGE" true
 HOST_MODE=1
 compose_run_args codex "$tmp/agent-home" "$tmp/work/app"
 args=" ${RUN_ARGS[*]} "
@@ -83,6 +96,7 @@ args=" ${RUN_ARGS[*]} "
 [[ "$args" != *" SATCHEL_SESSION_MODE=sandbox "* ]]
 [[ "$args" == *" --pid=host "* ]]
 [[ "$args" != *" --pid=private "* ]]
+"$docker_pid_like" run --rm "${RUN_ARGS[@]}" "$IMAGE" true
 HOST_MODE=0
 
 # Ownership preparation refuses arbitrary project and host paths even when
