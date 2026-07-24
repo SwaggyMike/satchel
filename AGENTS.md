@@ -34,6 +34,11 @@ temporary `HOME` and `SATCHEL_DIR`.
   Satchel-specific abstractions.
 - Keep Docker and Podman behavior aligned. Pure logic must not require a
   container engine merely to be tested.
+- Platform-specific content (the Unraid boot block, its flash paths) is written
+  in exactly one place; `install.sh` calls Satchel rather than carrying a copy.
+  Detection reads overridable variables so the behavior stays testable off that
+  platform. Do not add a platform abstraction layer for a second platform until
+  there is a second platform.
 
 ## Safety invariants
 
@@ -118,6 +123,7 @@ Subsystem mapping:
 - terminal output: `tests/test_output.sh`
 - project identity and handoffs: `tests/test_projects.sh`
 - reporting commands on a degraded host: `tests/test_reporting.sh`
+- Unraid detection and boot persistence: `tests/test_platform.sh`
 - shared skills: `tests/test_skills.sh`
 - SSH forwarding: `tests/test_ssh.sh`
 - Sync Repo Git behavior: `tests/test_sync.sh`

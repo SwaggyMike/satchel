@@ -28,6 +28,11 @@ SCRIPT_SHA_FILE="$SATCHEL_DIR/script-sha"
 INSTALL_PATH_FILE="$SATCHEL_DIR/install-path"
 SKILL_QUARANTINE_DIR="$SATCHEL_DIR/quarantine/skills"
 IMAGE_AGENTS_FILE="$SATCHEL_DIR/image-agents"
+# Unraid's identifying marker and its flash-backed config directory. Overridable
+# only so the behavior can be tested without an Unraid box — the previous
+# hardcoded path reads were why none of this had any test coverage.
+UNRAID_MARKER="${SATCHEL_UNRAID_MARKER:-/etc/unraid-version}"
+UNRAID_BOOT_DIR="${SATCHEL_UNRAID_BOOT_DIR:-/boot/config}"
 IMAGE="localhost/satchel:latest"
 MANAGED_CONTAINER_LABEL="io.github.swaggymike.satchel.managed=true"
 

@@ -1,6 +1,11 @@
+# The installed command's real path. A function rather than an inline
+# `readlink -f "$0"` so tests that source the artifact can point it at a
+# fixture instead of at the test script.
+satchel_self() { readlink -f "${SATCHEL_SELF:-$0}"; }
+
 shim_dir() {
   local self_dir
-  self_dir="$(dirname "$(readlink -f "$0")")"
+  self_dir="$(dirname "$(satchel_self)")"
   if [ -n "${SATCHEL_BIN:-}" ]; then printf '%s' "$SATCHEL_BIN"
   elif [ -d "$self_dir/.satchel" ]; then printf '%s' "$self_dir"
   elif [ -w /usr/local/bin ]; then printf '%s' "/usr/local/bin"
@@ -167,53 +172,102 @@ installed_satchel_path() { # true only for an installer-owned script location
          || grep -qs '^MACHINE=' "$self_dir/.satchel/config"; }
 }
 
-# Unraid restores /usr/local/bin and /root/.ssh from /boot/config/go at every
-# boot, and the block install.sh writes bakes in whichever shims existed then.
-# Rewriting it on link/unlink keeps a later-added shim from vanishing at the
-# next reboot, and stops an unlinked one from being recreated as a dangling
-# symlink forever.
+is_unraid() { [ -f "$UNRAID_MARKER" ]; }
+unraid_go_file() { printf '%s/go' "$UNRAID_BOOT_DIR"; }
+unraid_key_dir() { printf '%s/ssh/root' "$UNRAID_BOOT_DIR"; }
+
+BOOT_BLOCK_BEGIN='# >>> satchel boot persistence >>>'
+BOOT_BLOCK_END='# <<< satchel boot persistence <<<'
+
+# Unraid rebuilds /usr/local/bin and /root/.ssh from the flash-backed go script
+# at every boot, so Satchel's command links and sync key have to be restored
+# there. This function is the ONLY place that content is spelled out: it was
+# previously duplicated in install.sh and in the README, and the copies had
+# already drifted apart by one line.
 unraid_boot_block_body() { # unraid_boot_block_body <satchel-path> <shim>...
   local self="$1"; shift
   printf 'ln -sf %s' "$self"
   local s; for s in "$@"; do printf ' %s' "$s"; done
   printf ' /usr/local/bin/\n'
   printf 'mkdir -p /root/.ssh && chmod 700 /root/.ssh\n'
-  printf 'cp /boot/config/ssh/root/id_ed25519* /root/.ssh/ 2>/dev/null && chmod 600 /root/.ssh/id_ed25519\n'
-  printf 'cp /boot/config/ssh/root/known_hosts /root/.ssh/ 2>/dev/null\n'
+  printf 'cp %s/id_ed25519* /root/.ssh/ 2>/dev/null && chmod 600 /root/.ssh/id_ed25519\n' "$(unraid_key_dir)"
+  printf 'cp %s/known_hosts /root/.ssh/ 2>/dev/null\n' "$(unraid_key_dir)"
 }
 
-sync_unraid_boot_block() {
-  local go=/boot/config/go begin='# >>> satchel boot persistence >>>'
-  local end='# <<< satchel boot persistence <<<' tmp self bin agent shims=()
-  [ -f /etc/unraid-version ] && [ -f "$go" ] || return 0
-  grep -qsF "$begin" "$go" || return 0
-  grep -qsF "$end" "$go" || { warn "the Satchel block in $go has no closing marker — leaving it untouched"; return 0; }
-  self="$(readlink -f "$0")"
-  bin="$(shim_dir)"
+unraid_owned_shims() { # prints this installation's shim paths, one per line
+  local self bin agent
+  self="$(satchel_self)"; bin="$(shim_dir)"
   for agent in claude codex; do
-    shim_owned_by_install "$bin/$agent" "$agent" "$self" && shims+=("$bin/$agent")
+    shim_owned_by_install "$bin/$agent" "$agent" "$self" && printf '%s\n' "$bin/$agent"
   done
+  return 0
+}
+
+write_unraid_boot_block() { # write_unraid_boot_block <go-file>
+  local go="$1" tmp self shim shims=()
+  self="$(satchel_self)"
+  while IFS= read -r shim; do shims+=("$shim"); done < <(unraid_owned_shims)
   tmp="$(mktemp)"
   {
-    awk -v begin="$begin" -v end="$end" '
+    [ ! -f "$go" ] || awk -v begin="$BOOT_BLOCK_BEGIN" -v end="$BOOT_BLOCK_END" '
       $0 == begin { skip=1; next } $0 == end { skip=0; next } !skip { print }' "$go"
-    printf '%s\n' "$begin"
+    printf '%s\n' "$BOOT_BLOCK_BEGIN"
     unraid_boot_block_body "$self" ${shims[@]+"${shims[@]}"}
-    printf '%s\n' "$end"
+    printf '%s\n' "$BOOT_BLOCK_END"
   } > "$tmp"
   if cp -- "$tmp" "$go" 2>/dev/null; then
+    rm -f "$tmp"
+    # Make this boot look like the next one will.
+    ln -sf "$self" ${shims[@]+"${shims[@]}"} /usr/local/bin/ 2>/dev/null || true
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
+}
+
+# Offered once, during init. Previously install.sh asked and wrote its own copy
+# of the block, which is how the two versions drifted.
+ensure_unraid_boot_block() {
+  is_unraid && [ -d "$UNRAID_BOOT_DIR" ] || return 0
+  local go; go="$(unraid_go_file)"
+  if grep -qsF "$BOOT_BLOCK_BEGIN" "$go"; then
+    sync_unraid_boot_block
+    return 0
+  fi
+  case "$(readlink -f "$SATCHEL_DIR")" in
+    /usr/local/bin/*|/root/*) return 0 ;;   # nothing here survives a reboot anyway
+  esac
+  [ -t 0 ] || { warn "unraid: add boot persistence to $go so Satchel survives reboots (see the README)"; return 0; }
+  info "unraid: / is rebuilt at every boot, so Satchel's command links and sync key need restoring"
+  confirm_yes "add boot persistence to $go?" || return 0
+  if write_unraid_boot_block "$go"; then
+    info "added Satchel boot persistence to $go"
+  else
+    warn "could not write Satchel's boot-persistence block to $go"
+  fi
+  return 0
+}
+
+# Keeps an existing block in step with link/unlink, so a shim added later does
+# not vanish at the next reboot and an unlinked one is not recreated forever.
+sync_unraid_boot_block() {
+  local go; go="$(unraid_go_file)"
+  is_unraid && [ -f "$go" ] || return 0
+  grep -qsF "$BOOT_BLOCK_BEGIN" "$go" || return 0
+  grep -qsF "$BOOT_BLOCK_END" "$go" \
+    || { warn "the Satchel block in $go has no closing marker — leaving it untouched"; return 0; }
+  if write_unraid_boot_block "$go"; then
     info "refreshed Satchel boot persistence in $go"
   else
     warn "could not update Satchel's boot-persistence block in $go"
   fi
-  rm -f "$tmp"
   return 0
 }
 
 remove_unraid_boot_block() {
-  local go=/boot/config/go begin='# >>> satchel boot persistence >>>'
-  local end='# <<< satchel boot persistence <<<' tmp
-  [ -f /etc/unraid-version ] && [ -f "$go" ] || return 0
+  local go begin="$BOOT_BLOCK_BEGIN" end="$BOOT_BLOCK_END" tmp
+  go="$(unraid_go_file)"
+  is_unraid && [ -f "$go" ] || return 0
   grep -qsF "$begin" "$go" || return 0
   if ! grep -qsF "$end" "$go"; then
     warn "the Satchel block in $go has no closing marker — leaving it untouched"

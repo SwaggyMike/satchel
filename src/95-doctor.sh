@@ -105,17 +105,18 @@ cmd_doctor() {
 
   # Unraid rebuilds / and /root from flash at every boot, so anything Satchel
   # needs there has to exist on flash too.
-  if [ -f /etc/unraid-version ]; then
-    if [ -d /boot/config ]; then
-      if compgen -G '/boot/config/ssh/root/id_*' >/dev/null; then
+  if is_unraid; then
+    if [ -d "$UNRAID_BOOT_DIR" ]; then
+      local go; go="$(unraid_go_file)"
+      if compgen -G "$(unraid_key_dir)/id_*" >/dev/null; then
         d_ok "unraid: sync SSH key is backed up to flash"
       elif [ -n "$(standard_private_keys)" ]; then
         d_warn "unraid: the SSH key in \$HOME/.ssh is not on flash and will vanish at reboot — run 'satchel key --persist'"
       fi
-      if grep -qsF '# >>> satchel boot persistence >>>' /boot/config/go; then
-        d_ok "unraid: boot persistence block present in /boot/config/go"
+      if grep -qsF "$BOOT_BLOCK_BEGIN" "$go"; then
+        d_ok "unraid: boot persistence block present in $go"
       else
-        d_warn "unraid: no boot-persistence block in /boot/config/go — shims and key will not survive a reboot"
+        d_warn "unraid: no boot-persistence block in $go — shims and key will not survive a reboot; 'satchel init' offers to add it"
       fi
     fi
     case "$(readlink -f "$SATCHEL_DIR")" in

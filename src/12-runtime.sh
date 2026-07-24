@@ -96,6 +96,10 @@ standard_private_keys() {
   for key in id_ed25519 id_ecdsa id_rsa; do
     [ -f "$HOME/.ssh/$key" ] && printf '%s\n' "$HOME/.ssh/$key"
   done
+  # Finding nothing is a normal answer, not a failure. Without this the loop's
+  # last false test becomes the return status, and under pipefail a caller
+  # doing `k="$(standard_private_keys | head -n 1)"` takes set -e with it.
+  return 0
 }
 
 stop_temporary_ssh_agent() {

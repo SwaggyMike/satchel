@@ -121,21 +121,17 @@ Either way that puts the script, the `claude`/`codex` shims, and all state (a si
 directory, and satchel finds its state next to itself.
 
 Two things do live on the RAM disk and need restoring at every boot: the
-PATH links in `/usr/local/bin` and the sync SSH key in `/root/.ssh`. The
-installer offers to append a marked block to `/boot/config/go` that restores
-both, and `init` keeps a copy of the key it generates in
-`/boot/config/ssh/root/` for that block to restore. Accept the prompt and
-reboots just work. If you'd rather manage `go` yourself, the block it would
-have added is:
+PATH links in `/usr/local/bin` and the sync SSH key and `known_hosts` in
+`/root/.ssh`. `satchel init` offers to append a marked block to
+`/boot/config/go` that restores them, and keeps a copy of the key in
+`/boot/config/ssh/root/` for that block to use. Accept the prompt and reboots
+just work.
 
-```sh
-# >>> satchel boot persistence >>>
-ln -sf /mnt/user/appdata/satchel/satchel /mnt/user/appdata/satchel/claude /usr/local/bin/
-mkdir -p /root/.ssh && chmod 700 /root/.ssh
-cp /boot/config/ssh/root/id_ed25519* /root/.ssh/ 2>/dev/null && chmod 600 /root/.ssh/id_ed25519
-cp /boot/config/ssh/root/known_hosts /root/.ssh/ 2>/dev/null
-# <<< satchel boot persistence <<<
-```
+Satchel is the only thing that writes that block — `satchel link` and
+`satchel unlink` keep it in step, and `satchel uninstall` removes it. To see
+exactly what it contains on your machine, look at `/boot/config/go`; this
+README deliberately no longer reproduces it, because the copy here drifted out
+of step with the real one.
 
 (Only shims the installer actually created are linked — an existing non-satchel
 `codex` in `/usr/local/bin` is never clobbered. And the flash drive is

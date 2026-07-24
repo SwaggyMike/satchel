@@ -11,17 +11,18 @@ have_pubkey() { compgen -G "$HOME/.ssh/*.pub" >/dev/null; }
 # known_hosts goes too: without it the first sync after every reboot stalls on
 # host verification and then reports the remote as unreachable.
 persist_unraid_ssh() { # persist_unraid_ssh [quiet]
-  [ -f /etc/unraid-version ] && [ -d /boot/config ] || return 0
-  local key copied=0
-  key="$(standard_private_keys | head -n 1)"
+  is_unraid && [ -d "$UNRAID_BOOT_DIR" ] || return 0
+  local key dir copied=0
+  key="$(standard_private_keys | head -n 1)" || key=""
   [ -n "$key" ] || return 0
-  mkdir -p /boot/config/ssh/root
-  if [ ! -f "/boot/config/ssh/root/$(basename "$key")" ]; then
-    cp "$key" "$key.pub" /boot/config/ssh/root/ 2>/dev/null && copied=1
+  dir="$(unraid_key_dir)"
+  mkdir -p "$dir"
+  if [ ! -f "$dir/$(basename "$key")" ]; then
+    cp "$key" "$key.pub" "$dir/" 2>/dev/null && copied=1
   fi
-  [ ! -f "$HOME/.ssh/known_hosts" ] || cp "$HOME/.ssh/known_hosts" /boot/config/ssh/root/ 2>/dev/null || true
+  [ ! -f "$HOME/.ssh/known_hosts" ] || cp "$HOME/.ssh/known_hosts" "$dir/" 2>/dev/null || true
   [ "$copied" -eq 0 ] || [ "${1:-}" = quiet ] \
-    || info "Unraid: SSH key copied to /boot/config/ssh/root so it survives reboots"
+    || info "Unraid: SSH key copied to $dir so it survives reboots"
   return 0
 }
 
@@ -54,7 +55,7 @@ cmd_key() {
     # Only generate_key backed keys up before, so a machine that already had a
     # key when it joined kept nothing on flash and lost SSH at the next reboot.
     persist_unraid_ssh
-    [ -f /etc/unraid-version ] || info "--persist only applies on Unraid; nothing to do here"
+    is_unraid || info "--persist only applies on Unraid; nothing to do here"
   fi
   print_pubkeys "this machine's public key — add it to your git host (profile SSH keys, or the repo's deploy keys with write access):"
 }
@@ -203,6 +204,9 @@ cmd_init() {
     warn "no sync repo — sessions work, but handoffs/MCP/skills stay on this machine"
   fi
 
+  # Satchel owns its boot-persistence block, so the installer does not need a
+  # second copy of it to drift out of step.
+  ensure_unraid_boot_block
   cmd_image
   [ "$was_initialized" -eq 0 ] || offer_baseline_refresh
   success "done. try: cd <a project> && $(agent_launch_command claude)"

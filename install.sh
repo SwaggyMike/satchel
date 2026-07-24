@@ -106,7 +106,6 @@ installed_satchel="$(readlink -f "$BIN/satchel")"
 printf '%s\n' "$installed_satchel" > "$STATE_DIR/install-path"
 say "installed $BIN/satchel${sha:+ (commit ${sha:0:7})}"
 
-shims_installed=()
 install_shims="${SATCHEL_SHIMS:-y}"
 if [ "$install_shims" = y ] && { : </dev/tty; } 2>/dev/null; then
   printf 'install: %s' "Redirect claude and codex commands through Satchel? [Y/n] " >&2
@@ -132,45 +131,17 @@ if [ "$install_shims" = y ]; then
     printf '#!/usr/bin/env bash\n# satchel shim\nexec %q %s "$@"\n' "$installed_satchel" "$agent" > "$shim"
     chmod 755 "$shim"
     say "installed shim $shim"
-    shims_installed+=("$shim")
   done
 else
   say "skipped shims — run 'satchel link' later to redirect claude/codex through Satchel"
 fi
 
 if [ -f /etc/unraid-version ] && [ "$BIN" != /usr/local/bin ]; then
-  # Finish the job on Unraid: /usr/local/bin and /root/.ssh are rebuilt at
-  # every boot, so the PATH links and the sync SSH key (which satchel keeps a
-  # copy of on flash) must be restored by /boot/config/go. Offer to write
-  # that block; the marker keeps reruns from stacking duplicates.
-  go=/boot/config/go
-  marker="# >>> satchel boot persistence >>>"
-  add_go=n
-  if grep -qsF "$marker" "$go"; then
-    usay "boot persistence already set up in $go"
-  elif { : </dev/tty; } 2>/dev/null; then
-    uask "add boot persistence to $go (PATH links + sync SSH key restore)? [Y/n] "
-    IFS= read -r reply </dev/tty || reply=""
-    case "$reply" in [Nn]*) : ;; *) add_go=y ;; esac
-  fi
-  if [ "$add_go" = y ]; then
-    {
-      printf '\n%s\n' "$marker"
-      printf 'ln -sf %s' "$BIN/satchel"
-      for s in ${shims_installed[@]+"${shims_installed[@]}"}; do printf ' %s' "$s"; done
-      printf ' /usr/local/bin/\n'
-      printf 'mkdir -p /root/.ssh && chmod 700 /root/.ssh\n'
-      printf 'cp /boot/config/ssh/root/id_ed25519* /root/.ssh/ 2>/dev/null && chmod 600 /root/.ssh/id_ed25519\n'
-      printf '# <<< satchel boot persistence <<<\n'
-    } >> "$go"
-    usay "added boot persistence to $go"
-    # Make this boot look like the next one will.
-    ln -sf "$BIN/satchel" ${shims_installed[@]+"${shims_installed[@]}"} /usr/local/bin/ 2>/dev/null || true
-  elif ! grep -qsF "$marker" "$go"; then
-    usay "NOTE: to survive reboots, add to $go:"
-    usay "  ln -sf $BIN/satchel ${shims_installed[*]-} /usr/local/bin/"
-    usay "  (and persist the sync SSH key — see the Unraid section of the README)"
-  fi
+  # Boot persistence is satchel's job, not the installer's: 'satchel init'
+  # offers it below, and 'satchel link'/'unlink' keep it in step afterwards.
+  # The installer used to carry its own copy of that block, and the two
+  # versions drifted apart by a line.
+  usay "/ is rebuilt at every boot — setup will offer to add boot persistence to /boot/config/go"
 else
   case ":$PATH:" in
     *":$BIN:"*) : ;;
