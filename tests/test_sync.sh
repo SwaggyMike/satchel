@@ -209,4 +209,15 @@ quiet_push "must be a no-op" >/dev/null 2>&1
 SYNC_DEGRADED=0
 sync_ready
 
+# Syncing fails open, so unpushed work can accumulate quietly. The command
+# people actually run must say so - doctor alone is not enough.
+git_sync reset -q --hard origin/main
+status_out="$(cmd_status 2>/dev/null)"
+refute_grep 'unpushed' <(printf '%s' "$status_out")
+touch "$SYNC_DIR/unpushed-marker"
+git_sync add -A && git_sync commit -q -m "local only"
+status_out="$(cmd_status 2>/dev/null)"
+assert_grep 'unpushed: 1 commit' <(printf '%s' "$status_out")
+git_sync reset -q --hard origin/main
+
 printf 'ok: sync commits, conflict backout, and recovery\n'

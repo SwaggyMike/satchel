@@ -32,6 +32,19 @@ cmd_status() {
     validate_sync_state
     printf '  sync: %s\n' "$SYNC_URL"
     printf '  last sync commit: %s\n' "$(git_sync log -1 --format='%h %s (%cr)' 2>/dev/null || echo none)"
+    # Syncing fails open now: a session never stops because the Sync Repo is
+    # unhappy. The cost is that work can quietly pile up unpushed, so the
+    # command people actually run has to surface it — not just doctor. Silent
+    # when there is nothing to say.
+    if has_upstream; then
+      local counts behind ahead
+      counts="$(git_sync rev-list --left-right --count '@{u}...HEAD' 2>/dev/null || echo '0 0')"
+      behind="${counts%%[[:space:]]*}"; ahead="${counts##*[[:space:]]}"
+      [ "$ahead" -eq 0 ] \
+        || printf '  %sunpushed: %s commit(s) — run satchel sync%s\n' "$OUT_YELLOW" "$ahead" "$OUT_RESET"
+      [ "$behind" -eq 0 ] \
+        || printf '  %sbehind origin by %s commit(s) — run satchel sync%s\n' "$OUT_YELLOW" "$behind" "$OUT_RESET"
+    fi
     local bv; bv="$(baseline_marker_version)"
     if [ -z "$bv" ]; then
       if [ -f "$(baseline_skip_file)" ]; then
