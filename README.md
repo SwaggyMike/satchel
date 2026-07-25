@@ -133,6 +133,14 @@ exactly what it contains on your machine, look at `/boot/config/go`; this
 README deliberately no longer reproduces it, because the copy here drifted out
 of step with the real one.
 
+`go` starts your web UI, so Satchel treats it carefully: the replacement is
+staged in the same directory and moved into place (a rename on the flash, never
+a partial overwrite), the previous version that parsed is kept beside it as
+`go.satchel-bak`, and anything that fails a syntax check is refused rather than
+installed. Worth knowing anyway: your Unraid flash drive is the single point of
+failure for the whole array configuration, so keep a current Flash Backup
+regardless of Satchel.
+
 (Only shims the installer actually created are linked — an existing non-satchel
 `codex` in `/usr/local/bin` is never clobbered. And the flash drive is
 unencrypted FAT — fine for a key scoped to your private sync repo; use your

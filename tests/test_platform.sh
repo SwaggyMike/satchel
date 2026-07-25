@@ -89,6 +89,72 @@ remove_unraid_boot_block >/dev/null 2>&1
 if grep -qF "$BOOT_BLOCK_BEGIN" "$go"; then fail "block survived removal"; fi
 grep -qF '/usr/local/emhttp/webGui/scripts/start' "$go" || fail "removal ate the user's go content"
 
+# --- the go script is boot-critical, so writing it has three guarantees ---
+printf '#!/bin/bash\n# pristine user go\n/usr/local/sbin/emhttp &\n' > "$go"
+rm -f "$(unraid_go_backup)"
+
+# 1. The replacement is staged in the SAME directory, so installing it is a
+#    rename on the flash and never a truncate-then-write of the real file.
+staged="$(stage_beside_go "$go")"
+[ "$(dirname "$staged")" = "$(dirname "$go")" ] || fail "replacement staged on another filesystem"
+rm -f "$staged"
+
+# 2. A copy of the last version that parsed is kept beside it.
+write_unraid_boot_block "$go" || fail "write failed"
+[ -f "$(unraid_go_backup)" ] || fail "no backup was taken"
+grep -qF '/usr/local/sbin/emhttp' "$(unraid_go_backup)" || fail "backup lost the user's content"
+if grep -qF "$BOOT_BLOCK_BEGIN" "$(unraid_go_backup)"; then
+  fail "backup should predate Satchel's first block"
+fi
+# and it is refreshed on later writes, but never with something broken
+write_unraid_boot_block "$go"
+grep -qF "$BOOT_BLOCK_BEGIN" "$(unraid_go_backup)" || fail "backup not refreshed on a later write"
+cp "$(unraid_go_backup)" "$tmp/good-backup"
+printf 'if then fi ((( \n' > "$go"          # a go file that cannot parse
+write_unraid_boot_block "$go" >/dev/null 2>&1 || true
+cmp -s "$(unraid_go_backup)" "$tmp/good-backup" \
+  || fail "a broken go file overwrote the known-good backup"
+
+# 3. Content that would be malformed is never installed. An unresolved satchel
+#    path used to emit a bare `ln -sf  /usr/local/bin/` into the boot script.
+printf '#!/bin/bash\n# pristine user go\n/usr/local/sbin/emhttp &\n' > "$go"
+cp "$go" "$tmp/before-malformed"
+SATCHEL_SELF="$tmp/does-not-exist" write_unraid_boot_block "$go" >/dev/null 2>&1 \
+  && fail "wrote a block with an unresolvable satchel path"
+cmp -s "$go" "$tmp/before-malformed" || fail "go was modified despite the refusal"
+
+out="$(SATCHEL_SELF="$tmp/does-not-exist" write_unraid_boot_block "$go" 2>&1 || true)"
+grep -q 'could not resolve the installed satchel command' <<< "$out" \
+  || fail "refusal was not explained"
+
+# The install step refuses malformed content on its own, not only because the
+# caller happened to catch it first — this is the last gate before a boot
+# script is replaced, so it has to hold independently.
+printf 'if then fi (((\n' > "$tmp/malformed-staged"
+cp "$go" "$tmp/before-install"
+if install_go_file "$tmp/malformed-staged" "$go" >/dev/null 2>&1; then
+  fail "install_go_file accepted content that does not parse"
+fi
+cmp -s "$go" "$tmp/before-install" || fail "go was modified by a refused install"
+[ ! -e "$tmp/malformed-staged" ] || fail "refused staged file was left behind"
+
+# The sanity gate itself: malformed content is rejected, valid content passes.
+printf '#!/bin/bash\nln -sf  /usr/local/bin/\n' > "$tmp/bad-link"
+if boot_script_sane "$tmp/bad-link"; then fail "empty link target must be rejected"; fi
+printf 'if then fi (((\n' > "$tmp/bad-syntax"
+if boot_script_sane "$tmp/bad-syntax"; then fail "unparseable script must be rejected"; fi
+: > "$tmp/empty"
+if boot_script_sane "$tmp/empty"; then fail "empty script must be rejected"; fi
+printf '#!/bin/bash\necho ok\n' > "$tmp/fine"
+boot_script_sane "$tmp/fine" || fail "a valid script must be accepted"
+
+# No temp files are left beside the boot script after any of that.
+leftover="$(find "$(dirname "$go")" -maxdepth 1 -name '*.satchel-tmp.*' -print -quit)"
+[ -z "$leftover" ] || fail "left a staged temp file beside the boot script: $leftover"
+
+# Hand the next section a go script with no Satchel block, as it expects.
+printf '#!/bin/bash\n# pristine user go\n/usr/local/sbin/emhttp &\n' > "$go"
+
 # Key persistence copies to flash only what exists, and is idempotent.
 persist_unraid_ssh quiet
 [ ! -e "$tmp/boot/ssh/root/id_ed25519" ] || fail "persisted a key that does not exist"

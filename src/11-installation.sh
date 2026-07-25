@@ -203,11 +203,59 @@ unraid_owned_shims() { # prints this installation's shim paths, one per line
   return 0
 }
 
+unraid_go_backup() { printf '%s.satchel-bak' "$(unraid_go_file)"; }
+
+# The go script is what starts Unraid's web UI at boot, so a half-written or
+# malformed one costs the user a trip to the flash drive with another PC.
+# Nothing here is allowed to install content that does not parse.
+boot_script_sane() { # boot_script_sane <file>
+  [ -s "$1" ] || return 1
+  [ "$(grep -cF "$BOOT_BLOCK_BEGIN" "$1")" -le 1 ] || return 1
+  [ "$(grep -cF "$BOOT_BLOCK_END" "$1")" -le 1 ] || return 1
+  # An unresolved satchel path would emit `ln -sf  /usr/local/bin/`, which is
+  # a broken command sitting in a boot script.
+  if grep -qE '^ln -sf[[:space:]]+/usr/local/bin/[[:space:]]*$' "$1"; then return 1; fi
+  bash -n "$1" 2>/dev/null
+}
+
+# Swap in a staged file that already sits in the same directory, so the change
+# is a rename on the flash rather than a truncate-then-write of the real file:
+# there is no window in which go is partially written. Keep the last version
+# that parsed, so a bad edit is always one cp away from being undone.
+install_go_file() { # install_go_file <staged-file> <go-file>
+  local staged="$1" go="$2" backup
+  if ! boot_script_sane "$staged"; then
+    rm -f -- "$staged"
+    warn "refusing to install a malformed $go — leaving the existing one untouched"
+    return 1
+  fi
+  backup="$(unraid_go_backup)"
+  if [ -f "$go" ] && boot_script_sane "$go"; then
+    cp -- "$go" "$backup" 2>/dev/null || true
+  fi
+  if mv -f -- "$staged" "$go" 2>/dev/null; then return 0; fi
+  if command -v sudo >/dev/null 2>&1 && sudo mv -f -- "$staged" "$go"; then return 0; fi
+  rm -f -- "$staged"
+  return 1
+}
+
+stage_beside_go() { # stage_beside_go <go-file> → prints a temp path in the same directory
+  mktemp "$1.satchel-tmp.XXXXXX" 2>/dev/null
+}
+
 write_unraid_boot_block() { # write_unraid_boot_block <go-file>
   local go="$1" tmp self shim shims=()
   self="$(satchel_self)"
+  # Never write a link line with no target into a boot script.
+  if [ -z "$self" ] || [ ! -e "$self" ]; then
+    warn "could not resolve the installed satchel command — not touching $go"
+    return 1
+  fi
   while IFS= read -r shim; do shims+=("$shim"); done < <(unraid_owned_shims)
-  tmp="$(mktemp)"
+  tmp="$(stage_beside_go "$go")" || {
+    warn "could not stage a replacement beside $go — not touching it"
+    return 1
+  }
   {
     [ ! -f "$go" ] || awk -v begin="$BOOT_BLOCK_BEGIN" -v end="$BOOT_BLOCK_END" '
       $0 == begin { skip=1; next } $0 == end { skip=0; next } !skip { print }' "$go"
@@ -215,14 +263,10 @@ write_unraid_boot_block() { # write_unraid_boot_block <go-file>
     unraid_boot_block_body "$self" ${shims[@]+"${shims[@]}"}
     printf '%s\n' "$BOOT_BLOCK_END"
   } > "$tmp"
-  if cp -- "$tmp" "$go" 2>/dev/null; then
-    rm -f "$tmp"
-    # Make this boot look like the next one will.
-    ln -sf "$self" ${shims[@]+"${shims[@]}"} /usr/local/bin/ 2>/dev/null || true
-    return 0
-  fi
-  rm -f "$tmp"
-  return 1
+  install_go_file "$tmp" "$go" || return 1
+  # Make this boot look like the next one will.
+  ln -sf "$self" ${shims[@]+"${shims[@]}"} /usr/local/bin/ 2>/dev/null || true
+  return 0
 }
 
 # Offered once, during init. Previously install.sh asked and wrote its own copy
@@ -273,21 +317,15 @@ remove_unraid_boot_block() {
     warn "the Satchel block in $go has no closing marker — leaving it untouched"
     return 0
   fi
-  tmp="$(mktemp)"
+  tmp="$(stage_beside_go "$go")" \
+    || die "could not stage a replacement beside $go; Satchel's boot block was left in place"
   awk -v begin="$begin" -v end="$end" '
     $0 == begin { skip=1; next }
     $0 == end   { skip=0; next }
     !skip       { print }
   ' "$go" > "$tmp"
-  if cp -- "$tmp" "$go" 2>/dev/null; then
-    :
-  elif command -v sudo >/dev/null 2>&1; then
-    sudo cp -- "$tmp" "$go"
-  else
-    rm -f "$tmp"
-    die "could not remove Satchel's boot-persistence block from $go"
-  fi
-  rm -f "$tmp"
+  install_go_file "$tmp" "$go" \
+    || die "could not remove Satchel's boot-persistence block from $go"
   info "removed Satchel boot persistence from $go"
 }
 
