@@ -21,7 +21,7 @@ A Git repository the user explicitly chose to track. `repositories.json` is the 
 _Avoid_: every working directory, every repository (ignored and unknown repos are not Projects)
 
 **Sync Repo**:
-The user-owned private git repository (cloned at `~/.satchel/sync/`) that carries handoffs, tool settings, the repository registry, the MCP Registry, and the Skill Library between machines. Its origin may be a hosted remote, an SSH bare repo, or a local bare repo on a consistently available NFS share. Agent login credentials and transcripts never enter it. It is bookkeeping, not the product: no state it can get into may stop a Session from starting. Conflicts in the registries Satchel owns are union-merged automatically; anything else is returned to a clean tree with local work intact rather than left mid-rebase, and syncing degrades for that run while the Session continues (ADR 0012).
+The user-owned private git repository (cloned at `~/.satchel/sync/`) that carries handoffs, tool settings, the repository registry, the MCP Registry, and the Skill Library between machines. Its origin may be a hosted remote, an SSH bare repo, or a local bare repo on a consistently available NFS share. Agent login credentials and transcripts never enter it. It is bookkeeping, not the product: no state it can get into may stop a Session from starting. A conflict is never resolved on the user's behalf — the clone is returned to a clean tree with local work intact rather than left mid-rebase, and syncing degrades for that run while the Session continues (ADR 0012).
 _Avoid_: cloud, backend, server
 
 **MCP Registry**:

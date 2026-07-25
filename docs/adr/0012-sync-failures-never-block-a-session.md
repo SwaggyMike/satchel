@@ -50,13 +50,11 @@ Three changes enforce that:
    `satchel sync` and `satchel status` keep the strict, fatal behavior — there
    the user asked about the repo itself.
 
-2. **Merge what Satchel owns.** `recover_sync_repo` union-merges conflicts in
-   the known registries: JSON objects via `jq -s '.[0] * .[1]'`, env files by
-   key with the local value winning a tie. A union can never drop a remote
-   entry, which is the only unrecoverable outcome. Anything Satchel does not
-   own is abandoned back to a clean tree — never left mid-rebase — and the
-   local commit stays on the branch. `recover_sync_repo` returns 0 (merged and
-   integrated), 2 (abandoned, clean, not integrated), or 1 (still broken).
+2. **Back out, never guess.** `recover_sync_repo` abandons the in-progress
+   operation and returns the clone to a clean tree. The local commit stays on
+   the branch, so nothing is lost — only its integration is postponed, and the
+   user reconciles once with plain git. It returns 0 (clean again) or 1 (still
+   broken).
 
 3. **Validate what is read, ignore what is not.** Required fields are still
    enforced; unknown keys are accepted. A newer Satchel elsewhere in the
@@ -64,29 +62,30 @@ Three changes enforce that:
 
 ## Consequences
 
-- Conflicts on shared registries resolve without user action, and both
-  machines converge on the union.
 - A machine can no longer be locked out of running an agent by the Sync Repo.
-- Ties are resolved in favour of the local machine. For `settings.env` that
-  means a caravan-wide setting changed on two machines in the same window
-  keeps the local value until the next explicit `satchel settings`.
-- Abandoning an unmergeable conflict leaves that machine behind the remote
-  until a human reconciles it. This is reported every session, and the local
-  commit is never lost.
-- The union merge only applies to files Satchel writes. Skills and handoffs are
-  ordinary files; conflicts there are still the user's to resolve, which is
-  correct — Satchel cannot know which version of a skill is wanted.
+- A conflict leaves that machine behind the remote until a human reconciles it.
+  This is reported every session, and the local commit is never lost.
+- Satchel never resolves a conflict on the user's behalf, so it can never pick
+  the wrong side silently.
 
 ## Alternatives considered
 
-**One file per registry entry** (`repositories/<hash>.json`) would make
-conflicts structurally impossible for adds and removes, which is stronger than
-merging after the fact. It was rejected for now only because it requires a
-migration across every machine in a caravan simultaneously — the exact
-cross-machine flag day this ADR exists to prevent. It remains the better
-long-term shape, and the union merge is forward-compatible with it.
+**Automatic union merging** of the registries Satchel owns (`jq -s '.[0] * .[1]'`
+for JSON, key-wise for env files) was implemented and then **removed**. It
+worked, but it solved a conflict the user had not actually been hitting, and it
+was the single largest complexity addition in that change — a merge algorithm
+plus a three-valued recovery result, inside a tool whose stated intent is to
+stay simple and boring. Backing out preserves the property that matters (the
+session is never blocked, the clone is never left mid-rebase) for a fraction of
+the code. Reinstate it only with evidence that conflicts are frequent enough to
+be worth an algorithm.
 
-**A git merge driver** via `.gitattributes` was rejected because a union merge
-of JSON produces invalid JSON, and the driver would have to be installed in
-every clone — machine-local configuration that new machines would silently
-lack.
+**One file per registry entry** (`repositories/<hash>.json`) would make
+conflicts structurally impossible for adds and removes. It remains the right
+shape if conflicts ever become common, and it is simpler than merging rather
+than an addition to it. Not done now because it needs a migration across every
+machine at once — the cross-machine flag day this ADR exists to prevent.
+
+**A git merge driver** via `.gitattributes` was rejected because it would have
+to be installed in every clone — machine-local configuration that new machines
+would silently lack.

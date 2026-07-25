@@ -256,16 +256,11 @@ underlying Linux host.
 The Sync Repo is bookkeeping; the session is the point. Nothing that happens to
 it can stop an agent from starting.
 
-Two machines changing different entries in the same shared file between syncs
-is the ordinary case, so Satchel merges those itself: `repositories.json`,
-`mcp.json`, `settings.env`, and `mcp-tokens.env` are union-merged, keeping every
-entry from both sides and letting the local machine win a genuine tie. You see
-one line saying it happened.
-
-A conflict in something Satchel does not own — a skill, a handoff — is yours to
-resolve, but the clone is never left mid-rebase waiting for you. Satchel puts it
-back to a clean state, keeps your local commit, says so every session, and
-carries on. `satchel doctor` shows what is still unreconciled.
+If two machines change the same file between syncs, Satchel does not try to
+merge it — it backs out to a clean state, keeps your local commit, tells you,
+and carries on. You reconcile once with plain git. The clone is never left
+mid-rebase waiting for you, which is what used to make the next session refuse
+to start. `satchel doctor` shows what is still unreconciled.
 
 If the synced state is unreadable for any other reason, the session still runs;
 only syncing stops for that run, and Satchel says why. Registry files are
