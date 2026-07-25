@@ -270,14 +270,17 @@ machine can add a field without breaking the older machines
 
 Because each machine builds its own container image from upstream's floating
 tags, two machines can legitimately run different agent versions. Each machine
-publishes what it has, and `satchel doctor` names the difference instead of
-leaving you to discover it as "it works on the other box".
+records what it is running in `machines/<name>/environment.json` at session end,
+and `satchel doctor` names any difference instead of leaving you to discover it
+as "it works on the other box"
+([ADR 0013](docs/adr/0013-publish-each-machine-runtime-environment.md)).
 
 ## What syncs, what doesn't
 
 The Sync Repo's root `profile.md` and `preferences.md` are global.
 `repositories.json` is the single authority mapping canonical Git origins to
-tracked Project IDs or ignored decisions. Bounded timestamped handoffs live
+tracked Project IDs or ignored decisions. Each machine also records what it is
+running in `machines/<name>/environment.json`. Bounded timestamped handoffs live
 under `projects/<id>/handoffs/`; machine-local checkout paths map only to those
 global IDs under `machines/<machine>/projects.json`. Notes, inventory, and
 guides are also machine-local. Global skills live under `skills/shared/`.
