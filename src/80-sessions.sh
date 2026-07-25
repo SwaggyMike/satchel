@@ -236,6 +236,26 @@ session_mount_guard() {
 # "detected dubious ownership". Declaring the mounted roots safe costs nothing
 # on hosts where the uid already matches, and the writability check turns a
 # confusing mid-session failure into one sentence at launch.
+# Agents want a git identity for project commits. Testing only for the file is
+# not enough: declare_session_safe_directories creates it, which would
+# permanently suppress this on a machine that gains a ~/.gitconfig after its
+# first session — commits would then fail with "Author identity unknown"
+# forever. Key off the identity itself, and never clobber an existing config.
+seed_agent_git_identity() { # seed_agent_git_identity <agent-home>
+  local cfg="$1/.gitconfig" name email
+  [ -f "$HOME/.gitconfig" ] || return 0
+  git config --file "$cfg" user.email >/dev/null 2>&1 && return 0
+  if [ ! -f "$cfg" ]; then
+    cp "$HOME/.gitconfig" "$cfg"
+    return 0
+  fi
+  name="$(git config --file "$HOME/.gitconfig" user.name 2>/dev/null || true)"
+  email="$(git config --file "$HOME/.gitconfig" user.email 2>/dev/null || true)"
+  if [ -n "$name" ]; then git config --file "$cfg" user.name "$name"; fi
+  if [ -n "$email" ]; then git config --file "$cfg" user.email "$email"; fi
+  return 0
+}
+
 declare_session_safe_directories() { # declare_session_safe_directories <agent-home> <project>
   local home="$1" cfg="$1/.gitconfig" d
   shift
@@ -385,8 +405,7 @@ cmd_session() {
       ;;
   esac
 
-  # First-run convenience: agents want a git identity for project commits.
-  [ ! -f "$home/.gitconfig" ] && [ -f "$HOME/.gitconfig" ] && cp "$HOME/.gitconfig" "$home/.gitconfig"
+  seed_agent_git_identity "$home"
 
   materialize_mcp "$agent" "$home"
   # Written even without sync: the "where you are running" note must reach

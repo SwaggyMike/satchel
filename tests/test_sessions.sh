@@ -370,6 +370,27 @@ grep -q '^complete$' "$events.interrupt-result"
 # files belong to root. Git refuses to touch a repository owned by another
 # user, so every git command inside the session fails with "dubious ownership"
 # until the mounted roots are declared safe.
+# The git identity must still reach the agent home after safe.directory has
+# created a .gitconfig there. Keying off the file's existence meant a machine
+# that gained a ~/.gitconfig after its first session never got an identity, and
+# every commit inside a session failed with "Author identity unknown".
+id_home="$tmp/id-home"; mkdir -p "$id_home"
+printf '[user]\n\tname = Test User\n\temail = test@example.com\n' > "$HOME/.gitconfig"
+declare_session_safe_directories "$id_home" "$tmp/work/app"   # creates .gitconfig first
+seed_agent_git_identity "$id_home"
+[ "$(git config --file "$id_home/.gitconfig" user.email)" = "test@example.com" ]
+[ "$(git config --file "$id_home/.gitconfig" user.name)" = "Test User" ]
+git config --file "$id_home/.gitconfig" --get-all safe.directory | grep -qF "$tmp/work/app"
+# An identity already set in the agent home is never overwritten by the host's.
+git config --file "$id_home/.gitconfig" user.email "kept@example.com"
+seed_agent_git_identity "$id_home"
+[ "$(git config --file "$id_home/.gitconfig" user.email)" = "kept@example.com" ]
+# A fresh home with no prior config still gets the whole host config copied.
+fresh_home="$tmp/fresh-home"; mkdir -p "$fresh_home"
+seed_agent_git_identity "$fresh_home"
+[ "$(git config --file "$fresh_home/.gitconfig" user.email)" = "test@example.com" ]
+rm -f "$HOME/.gitconfig"
+
 safe_home="$tmp/safe-home"
 mkdir -p "$safe_home" "$tmp/work/extra"
 declare_session_safe_directories "$safe_home" "$tmp/work/app" "$tmp/work/extra"
