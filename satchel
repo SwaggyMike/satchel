@@ -1960,12 +1960,31 @@ EOF
         printf '\nAlso mounted read-write at their real paths, as part of this working set (--with):\n'
         for w in "${WITH_DIRS[@]}"; do printf -- '- %s\n' "$w"; done
       fi
+      # Only on a root-run host (Unraid & co), where the session deliberately
+      # runs as an unprivileged uid the host's files do not belong to. An agent
+      # that hits EACCES there will otherwise reach for chmod or sudo, neither
+      # of which can help from inside the container.
+      if [ "$(id -u)" -eq 0 ] && [ "$SATCHEL_UID" != 0 ]; then
+        cat <<EOF
+
+This session runs as uid $SATCHEL_UID, while the mounted files belong to the
+host's root. A write can therefore fail with a permission error even when the
+path is correct. That is host ownership and cannot be fixed from inside this
+container; report it instead, and note that the user's fix is
+\`chown -R $SATCHEL_UID:$SATCHEL_GID <path>\` on the host.
+EOF
+      fi
       case "${SSH_STATE:=$(ssh_agent_state)}" in
         ready) cat <<'EOF'
 
-The host's ssh-agent is forwarded into this session and has identities
-loaded: git push/pull over SSH works normally, even though no key files
-exist in the container.
+The host's ssh-agent is forwarded into this session, so git over SSH signs with
+the identities loaded in it; no key files exist in the container. The host's
+~/.ssh/config is NOT mounted, so per-host IdentityFile, User, and Port settings
+from it do not apply here — a remote that relies on one of those may fail even
+though other remotes work. `ssh-add -l` shows what is actually available.
+"Permission denied (publickey)" means the needed key is not in the forwarded
+agent; only the user can fix that on the host, so ask rather than debugging
+credentials in here.
 EOF
           ;;
         empty) cat <<'EOF'
@@ -1974,8 +1993,9 @@ The host's ssh-agent socket is forwarded into this session, but the agent
 had no identities loaded at session start. git push/pull over SSH will fail
 with "Permission denied (publickey)" until the user runs ssh-add on the
 host; a key they add becomes usable here immediately, no restart needed.
-If a push fails that way, ask the user to run ssh-add instead of debugging
-credentials inside the container.
+The host's ~/.ssh/config is not mounted either, so per-host key selection from
+it does not apply. If a push fails that way, ask the user to run ssh-add
+instead of debugging credentials inside the container.
 EOF
           ;;
         *) cat <<'EOF'

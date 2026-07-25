@@ -132,6 +132,33 @@ export PATH
 SATCHEL_UID=1000 SATCHEL_GID=1000 ENGINE=docker
 grep -q 'chown -R 12345:12345 /satchel-data' "$repair_log"
 
+# On a root-run host the session deliberately runs as an unprivileged uid the
+# host's files do not belong to. Say so, because an agent hitting EACCES will
+# otherwise reach for chmod or sudo — neither of which can help from inside the
+# container. Machines without that mismatch must not pay for the explanation.
+own_home="$tmp/own-home"; mkdir -p "$own_home"
+ownership_note() { write_memory_file claude "$own_home" "" "$tmp/work/app"; cat "$own_home/.claude/CLAUDE.md"; }
+
+HOST_MODE=0
+id() { case "${1:-}" in -u) printf '0' ;; *) command id "$@" ;; esac; }
+grep -q "runs as uid $SATCHEL_UID" <(ownership_note)
+grep -q "chown -R $SATCHEL_UID:$SATCHEL_GID" <(ownership_note)
+grep -q 'cannot be fixed from inside' <(ownership_note)
+
+# A Host Session runs as root, so there is no mismatch to explain.
+HOST_MODE=1
+! grep -q 'cannot be fixed from inside' <(ownership_note)
+HOST_MODE=0
+
+# A root host that also runs sessions as root has nothing to explain either.
+saved_session_uid="$SATCHEL_UID"; SATCHEL_UID=0
+! grep -q 'cannot be fixed from inside' <(ownership_note)
+SATCHEL_UID="$saved_session_uid"
+
+# An ordinary non-root host never sees it at all.
+unset -f id
+! grep -q 'cannot be fixed from inside' <(ownership_note)
+
 # Synced registries reject path-special machine entries and malformed MCP
 # records before a session or sync can consume them.
 mkdir -p "$SATCHEL_DIR/sync/machines/..bad"

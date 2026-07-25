@@ -82,9 +82,21 @@ SSH_STATE=dead compose_run_args claude "$tmp/home_c" "$tmp/work/app"
 
 # The session preamble must match the probed state.
 preamble() { SSH_STATE="$1" write_memory_file claude "$tmp/home_c" "" "$tmp/work/app"; cat "$tmp/home_c/.claude/CLAUDE.md"; }
-grep -q 'works normally' <(preamble ready)
+
+# A reachable agent means git can sign — but NOT that every remote will work.
+# The host's ~/.ssh/config is not mounted, so a remote depending on a per-host
+# IdentityFile fails while others succeed. The preamble used to promise "git
+# push/pull over SSH works normally", which sent agents off debugging
+# credentials that cannot be fixed from inside the container.
+grep -q 'ssh-agent is forwarded' <(preamble ready)
+grep -q 'ssh/config is NOT mounted' <(preamble ready)
+grep -q 'ssh-add -l' <(preamble ready)
+grep -q 'Permission denied (publickey)' <(preamble ready)
+! grep -q 'works normally' <(preamble ready)
+
 grep -q 'Permission denied (publickey)' <(preamble empty)
 grep -q 'ssh-add' <(preamble empty)
+grep -q 'ssh/config is not mounted' <(preamble empty)
 ! grep -q 'works normally' <(preamble empty)
 grep -q 'cannot authenticate' <(preamble dead)
 grep -q 'cannot authenticate' <(preamble none)
