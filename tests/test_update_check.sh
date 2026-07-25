@@ -2,6 +2,7 @@
 set -euo pipefail
 
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$repo_dir/tests/lib.sh"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
@@ -26,7 +27,7 @@ set_remote_blob() {
 set_remote_blob 0000000000000000000000000000000000000000
 first_output="$(update_check 2>&1)"
 grep -q "satchel update" <<< "$first_output"
-! grep -q 'No such file or directory' <<< "$first_output"
+refute grep -q 'No such file or directory' <<< "$first_output"
 
 # Second call the same day: silent, and no network probe at all.
 rm -f "$STUB_HIT"
@@ -98,7 +99,7 @@ cmd_update >/dev/null 2>&1
 UPDATE_SHA=2222222222222222222222222222222222222222
 printf '#!/usr/bin/env bash\nexit 7\n' > "$download"
 chmod 755 "$download"
-! (cmd_update >/dev/null 2>&1)
+refute cmd_update
 [ "$(cat "$SCRIPT_SHA_FILE")" = 1111111111111111111111111111111111111111 ]
 unset -f readlink curl need_cmd print_update_log build_image image_agent_versions
 

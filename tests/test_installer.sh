@@ -2,6 +2,7 @@
 set -euo pipefail
 
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$repo_dir/tests/lib.sh"
 test_home="$(mktemp -d)"
 trap 'rm -rf "$test_home"' EXIT
 
@@ -355,16 +356,18 @@ grep -Fq "ps -a --filter label=io.github.swaggymike.satchel.managed=true" "$cont
   || fail "uninstall did not discover labeled Satchel containers" "$(cat "$container_log")"
 grep -Fq "container rm $stopped_container" "$container_log" \
   || fail "uninstall did not remove a stopped Satchel container" "$(cat "$container_log")"
-! grep -Fq "container rm $running_container" "$container_log" \
-  || fail "uninstall removed an active Satchel container" "$(cat "$container_log")"
+if grep -Fq "container rm $running_container" "$container_log"; then
+  fail "uninstall removed an active Satchel container" "$(cat "$container_log")"
+fi
 grep -q "left active Satchel container $running_container untouched" <<< "$output" \
   || fail "uninstall did not report the preserved active container" "$output"
 grep -q "image used by legacy-container" <<< "$output" \
   || fail "uninstall hid the container engine's image-removal error" "$output"
 grep -q "docker ps -a --filter ancestor=localhost/satchel:latest" <<< "$output" \
   || fail "uninstall did not provide a Docker-compatible blocker inspection command" "$output"
-! grep -q "docker ps -a --external" <<< "$output" \
-  || fail "uninstall suggested Podman's --external flag to Docker" "$output"
+if grep -q "docker ps -a --external" <<< "$output"; then
+  fail "uninstall suggested Podman's --external flag to Docker" "$output"
+fi
 
 printf 'ok: uninstall safely handles containers blocking image removal\n'
 
@@ -403,8 +406,9 @@ for agent in claude codex; do
   [ ! -e "$canonical_home/.local/bin/$agent" ] \
     || fail "symlinked-home uninstall left the $agent shim behind" "$output"
 done
-! grep -q 'ambiguous Satchel shim' <<< "$output" \
-  || fail "symlinked-home uninstall treated its own shim as ambiguous" "$output"
+if grep -q 'ambiguous Satchel shim' <<< "$output"; then
+  fail "symlinked-home uninstall treated its own shim as ambiguous" "$output"
+fi
 
 printf 'ok: symlinked-home uninstall removes exact owned shims\n'
 
@@ -541,8 +545,9 @@ set -e
 [ "$rc" -eq 0 ] || fail "non-interactive uninstall failed (rc=$rc)" "$output"
 [ -n "$(git --git-dir="$decline_origin" ls-tree -r --name-only main -- machines/keeper)" ] \
   || fail "--yes unexpectedly retired the current machine" "$output"
-! grep -q 'Retire .* from the caravan too' <<< "$output" \
-  || fail "--yes unexpectedly offered interactive retirement" "$output"
+if grep -q 'Retire .* from the caravan too' <<< "$output"; then
+  fail "--yes unexpectedly offered interactive retirement" "$output"
+fi
 
 cp "$repo_dir/satchel" "$decline_bin/satchel"
 chmod 755 "$decline_bin/satchel"

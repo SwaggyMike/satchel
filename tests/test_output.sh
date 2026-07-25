@@ -2,6 +2,7 @@
 set -euo pipefail
 
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$repo_dir/tests/lib.sh"
 
 plain="$(NO_COLOR=1 CLICOLOR_FORCE=1 TERM=xterm "$repo_dir/satchel" --help)"
 if grep -q $'\033' <<< "$plain"; then

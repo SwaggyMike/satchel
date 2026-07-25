@@ -2,6 +2,7 @@
 set -euo pipefail
 
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$repo_dir/tests/lib.sh"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
@@ -96,13 +97,15 @@ repair_output="$(repair_skill_library 1 2>&1)"
 grep -q "unexpected Skill Library file 'installer-state.json' was quarantined; it may be installer metadata rather than a skill" \
   <<< "$repair_output"
 [ "$(find "$SKILL_QUARANTINE_DIR" -mindepth 1 -maxdepth 1 | wc -l)" = 7 ]
-! git -C "$SATCHEL_DIR/sync" status --short | grep -q 'skills/shared/.system'
+if git -C "$SATCHEL_DIR/sync" status --short | grep -q 'skills/shared/.system'; then
+  fail "Codex .system skills leaked into the Sync Repo"
+fi
 grep -q 'quarantined locally: 7' <(cmd_status 2>/dev/null)
 printf '{"skills":{"stable":{"source":"example/stable"},"good":{"source":"example/good"}}}\n' \
   > "$SATCHEL_DIR/sync/skills/shared/skills-lock.json"
 skill_changes="$(report_skill_changes 2>&1)"
 grep -q 'skills installed: good' <<< "$skill_changes"
-! grep -q 'skills-lock.json' <<< "$skill_changes"
+refute grep -q 'skills-lock.json' <<< "$skill_changes"
 printf '\nupdated\n' >> "$SATCHEL_DIR/sync/skills/shared/stable/SKILL.md"
 grep -q 'skills updated: stable' <(report_skill_changes 2>&1)
 rm -rf -- "$SATCHEL_DIR/sync/skills/shared/stable"
@@ -183,6 +186,6 @@ args=" ${RUN_ARGS[*]} "
 [[ "$args" == *" SATCHEL_SESSION_MODE=sandbox "* ]]
 [[ "$args" != *" SATCHEL_SKILLS_DIR="* ]]
 write_memory_file codex "$tmp/home_unsynced" "" "$tmp/work"
-! grep -q '^## Satchel Skill Library$' "$tmp/home_unsynced/.codex/AGENTS.md"
+refute grep -q '^## Satchel Skill Library$' "$tmp/home_unsynced/.codex/AGENTS.md"
 
 printf 'ok: Satchel-native Skill Library runtime contract\n'

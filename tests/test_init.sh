@@ -2,6 +2,7 @@
 set -euo pipefail
 
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$repo_dir/tests/lib.sh"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
@@ -33,7 +34,7 @@ grep -q 'preserved incomplete Sync Repo files' <<< "$output"
 # A symlink is never followed, moved, or replaced.
 mkdir -p "$tmp/external"
 ln -s "$tmp/external" "$SYNC_DIR"
-! (prepare_sync_clone_destination 2>/dev/null)
+refute prepare_sync_clone_destination
 [ -L "$SYNC_DIR" ]
 [ -d "$tmp/external" ]
 rm "$SYNC_DIR"
@@ -59,7 +60,7 @@ cmd_init <<< $'office\n'"$origin"$'\n' >/dev/null 2>&1
 other_origin="$tmp/other-origin.git"
 git init -q --bare "$other_origin"
 cp "$CONFIG_FILE" "$tmp/config-before-mismatch"
-! (cmd_init <<< $'office\n'"$other_origin"$'\n' >/dev/null 2>&1)
+refute cmd_init <<< $'office\n'"$other_origin"$'\n'
 cmp "$tmp/config-before-mismatch" "$CONFIG_FILE"
 [ "$(git -C "$SYNC_DIR" remote get-url origin)" = "$origin" ]
 

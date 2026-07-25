@@ -2,6 +2,7 @@
 set -euo pipefail
 
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$repo_dir/tests/lib.sh"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
@@ -34,10 +35,10 @@ printf '<!-- satchel-machine-baseline version=2 generated=2026-07-23T00:00:00Z -
 [ "$(baseline_generated_at)" = 2026-07-23T00:00:00Z ]
 
 mkdir -p "$tmp/claude/.claude" "$tmp/codex/.codex"
-! baseline_authenticated claude "$tmp/claude"
+refute baseline_authenticated claude "$tmp/claude"
 # A .claude.json holding only materialized MCP config is not a login...
 printf '{ "mcpServers": { "x": { "url": "http://x" } } }\n' > "$tmp/claude/.claude.json"
-! baseline_authenticated claude "$tmp/claude"
+refute baseline_authenticated claude "$tmp/claude"
 # ...but auth material inside it is (API-key imports have no .credentials.json).
 printf '{ "primaryApiKey": "not-a-real-key" }\n' > "$tmp/claude/.claude.json"
 baseline_authenticated claude "$tmp/claude"
@@ -80,9 +81,9 @@ printf '# Notes\n- hostname: testbox\n' > "$old"
 printf '# Notes\n- hostname: testbox\n- storage: zfs\n' > "$new"
 baseline_secret_scan "$old" "$new"
 printf '# Notes\n- hostname: testbox\n- api_token = abcdefghijklmnopqrstuvwxyz012345\n' > "$new"
-! baseline_secret_scan "$old" "$new"
+refute baseline_secret_scan "$old" "$new"
 printf '# Notes\n- hostname: testbox\n- https://admin:correct-horse-battery-staple@example.test\n' > "$new"
-! baseline_secret_scan "$old" "$new"
+refute baseline_secret_scan "$old" "$new"
 
 # Baseline approval can now write inventory, notes, and guides; newly-added
 # content in every knowledge tier gets the same secret scan.
@@ -94,7 +95,7 @@ printf '<!-- satchel-machine-baseline version=2 generated=2026-07-23T00:00:00Z -
 printf '# Time Machine\n- Verify the Avahi service after reboot.\n' > "$new_tree/guides/time-machine.md"
 baseline_secret_scan_tree "$old_tree" "$new_tree"
 printf '# Time Machine\n- password = definitely-not-safe\n' > "$new_tree/guides/time-machine.md"
-! baseline_secret_scan_tree "$old_tree" "$new_tree"
+refute baseline_secret_scan_tree "$old_tree" "$new_tree"
 
 # The prompt's three choices retain their simple contract.
 [ "$(choose_baseline <<< y 2>/dev/null)" = yes ]

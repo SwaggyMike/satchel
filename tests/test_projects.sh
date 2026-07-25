@@ -2,6 +2,14 @@
 set -euo pipefail
 
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$repo_dir/tests/lib.sh"
+# session_mount_guard must refuse from these directories. A subshell keeps the
+# cd local, and refute cannot take a compound command.
+refute_guard_in() {
+  if (cd "$1" && session_mount_guard claude </dev/null >/dev/null 2>&1); then
+    fail "session_mount_guard should refuse to start in $1"
+  fi
+}
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
@@ -35,7 +43,7 @@ id="$(enroll_project "$tmp/work/app" sample)"
 [ -z "$(jq -r '."github.com/example/app".origin // empty' "$(repository_registry_file)")" ]
 [ "$(canonical_remote 'git@github.com:Example/Repo.git')" = "$(canonical_remote 'https://github.com/example/repo')" ]
 [ "$(canonical_remote 'https://token@example.com/Owner/Repo.git?x=secret')" = example.com/Owner/Repo ]
-! grep -q token "$(repository_registry_file)"
+refute grep -q token "$(repository_registry_file)"
 printf '<!-- satchel-handoff project=sample machine=a date=2026-01-01T00:00:00Z -->\n' \
   > "$SATCHEL_DIR/sync/projects/sample/handoffs/old.md"
 printf '<!-- satchel-handoff project=sample machine=b date=2026-02-01T00:00:00Z -->\n' \
@@ -62,7 +70,7 @@ write_memory_file claude "$tmp/home_c" "" "$tmp/work/app" 2>/dev/null
 grep -q '/home/satchel/machine/notes.md' "$tmp/home_c/.claude/CLAUDE.md"
 # Absolute paths only: a Host Session runs as root, where '~' resolves to
 # /root and sent an agent looking for /root/machine/notes.md once.
-! grep -q '~/machine\|~/projects' "$tmp/home_c/.claude/CLAUDE.md"
+refute grep -q '~/machine\|~/projects' "$tmp/home_c/.claude/CLAUDE.md"
 printf 'USE PODMAN NOT DOCKER ON TESTBOX\n' > "$SATCHEL_DIR/sync/machines/testbox/notes.md"
 printf '<!-- satchel-machine-baseline version=2 generated=2026-07-23T01:02:03Z -->\n# Inventory\nINVENTORY_DETAIL_SHOULD_NOT_LOAD\n' \
   > "$SATCHEL_DIR/sync/machines/testbox/inventory.md"
@@ -73,7 +81,7 @@ write_memory_file claude "$tmp/home_c" "" "$tmp/work/app" 2>/dev/null
 grep -q 'USE PODMAN NOT DOCKER ON TESTBOX' "$tmp/home_c/.claude/CLAUDE.md"
 grep -q '/home/satchel/machine/inventory.md (generated 2026-07-23T01:02:03Z)' "$tmp/home_c/.claude/CLAUDE.md"
 grep -q '/home/satchel/machine/guides/time-machine.md.*Time Machine' "$tmp/home_c/.claude/CLAUDE.md"
-! grep -q 'INVENTORY_DETAIL_SHOULD_NOT_LOAD\|GUIDE_DETAIL_SHOULD_NOT_LOAD' "$tmp/home_c/.claude/CLAUDE.md"
+refute grep -q 'INVENTORY_DETAIL_SHOULD_NOT_LOAD\|GUIDE_DETAIL_SHOULD_NOT_LOAD' "$tmp/home_c/.claude/CLAUDE.md"
 grep -q 'Resolved one-time fixes belong nowhere' "$tmp/home_c/.claude/CLAUDE.md"
 write_memory_file claude "$tmp/home_c" sample "$tmp/work/app" 2>/dev/null
 grep -q 'USE PODMAN NOT DOCKER ON TESTBOX' "$tmp/home_c/.claude/CLAUDE.md"
@@ -109,14 +117,14 @@ WITH_DIRS=()
 
 # The mount guard still hard-refuses home and / without a tty.
 HOST_MODE=0 UNSAFE_HOME=0
-! (cd "$HOME" && session_mount_guard claude </dev/null 2>/dev/null)
-! (cd / && session_mount_guard claude </dev/null 2>/dev/null)
+refute_guard_in "$HOME"
+refute_guard_in /
 (cd "$tmp/work/app" && session_mount_guard claude </dev/null)
 ln -s "$HOME" "$tmp/work/home-link"
-! (cd "$tmp/work/home-link" && session_mount_guard claude </dev/null 2>/dev/null)
-! (cd "$SATCHEL_DIR" && session_mount_guard claude </dev/null 2>/dev/null)
+refute_guard_in "$tmp/work/home-link"
+refute_guard_in "$SATCHEL_DIR"
 WITH_DIRS=("$SATCHEL_DIR")
-! (with_dirs_guard 2>/dev/null)
+refute with_dirs_guard
 WITH_DIRS=()
 UNSAFE_HOME=1
 (cd "$HOME" && session_mount_guard claude </dev/null)
@@ -124,15 +132,15 @@ UNSAFE_HOME=0
 
 # Ordinary directories never become Projects, even explicitly. A local Git
 # repo can be explicitly tracked but is not an automatic prompt candidate.
-! (enroll_project "$tmp/work/downloads" nope 2>/dev/null)
+refute enroll_project "$tmp/work/downloads" nope
 git init -q -b main "$tmp/work/local"
 local_id="$(enroll_project "$tmp/work/local" local-only)"
 [ "$local_id" = local-only ]
 [ -z "$(project_identity "$tmp/work/local")" ]
 [ -z "$(visible_candidates "$tmp/work/local")" ]
-! (enroll_project "$tmp/work/local" .. 2>/dev/null)
-! (enroll_project "$tmp/work/local" .git 2>/dev/null)
-! (untrack_project .. 2>/dev/null)
+refute enroll_project "$tmp/work/local" ..
+refute enroll_project "$tmp/work/local" .git
+refute untrack_project ..
 [ ! -e "$SATCHEL_DIR/sync/handoffs" ]
 [ ! -e "$SATCHEL_DIR/sync/project.json" ]
 
@@ -155,13 +163,13 @@ ignore_repository github.com/example/junk
 refresh_project_paths "$tmp/work"
 [ "$(repository_decision github.com/example/junk)" = ignored ]
 [ -z "$(project_for_path "$tmp/work/nested/junk")" ]
-! visible_candidates "$tmp/work" | grep -q junk
+if visible_candidates "$tmp/work" | grep -q junk; then fail "junk dir offered as a candidate"; fi
 
 git init -q -b main "$tmp/work/newrepo"
 git -C "$tmp/work/newrepo" remote add origin https://user:password@example.com/team/newrepo.git
 candidate="$(visible_candidates "$tmp/work")"
 [ "$candidate" = "$(printf '%s\texample.com/team/newrepo' "$(readlink -f "$tmp/work/newrepo")")" ]
-! grep -q 'user\|password' <<< "$candidate"
+refute grep -q 'user\|password' <<< "$candidate"
 mkdir -p "$tmp/work/newrepo-copy"
 git init -q -b main "$tmp/work/newrepo-copy"
 git -C "$tmp/work/newrepo-copy" remote add origin git@example.com:team/newrepo.git
@@ -170,7 +178,7 @@ mkdir -p "$tmp/outside-repo"
 git init -q -b main "$tmp/outside-repo"
 git -C "$tmp/outside-repo" remote add origin https://example.com/outside/repo.git
 ln -s "$tmp/outside-repo" "$tmp/work/outside-link"
-! visible_candidates "$tmp/work" | grep -q 'example.com/outside/repo'
+if visible_candidates "$tmp/work" | grep -q 'example.com/outside/repo'; then fail "repo outside the roots was offered"; fi
 
 # An origin change invalidates the checkout cache and requires a new decision.
 git -C "$tmp/work/nested/app2" remote set-url origin https://github.com/example/app2-renamed.git
@@ -216,7 +224,7 @@ grep -q 'sample2' "$tmp/home_c/.claude/CLAUDE.md"
 grep -q 'unreachable here' "$tmp/home_c/.claude/CLAUDE.md"
 # Exactly one visible project: adopted as the session's project, no TOC.
 write_memory_file claude "$tmp/home_c" "" "$tmp/work/nested" 2>/dev/null
-! grep -q 'Tracked projects in this session' "$tmp/home_c/.claude/CLAUDE.md"
+refute grep -q 'Tracked projects in this session' "$tmp/home_c/.claude/CLAUDE.md"
 grep -q 'No handoff exists for this project yet' "$tmp/home_c/.claude/CLAUDE.md"
 
 # file_multi_handoffs: files each well-formed chunk under its scope, drops
@@ -301,7 +309,7 @@ collision_one="$(enroll_project "$tmp/collisions/one/satchel")"
 collision_two="$(enroll_project "$tmp/collisions/two/satchel")"
 [ "$collision_one" = satchel ]
 [ "$collision_two" = satchel-2 ]
-! (enroll_project "$tmp/collisions/three/other" satchel 2>/dev/null)
+refute enroll_project "$tmp/collisions/three/other" satchel
 [ -z "$(repository_decision example.com/three/other)" ]
 
 # Registry and cache conflicts fail explicitly. Satchel never guesses through
@@ -309,14 +317,14 @@ collision_two="$(enroll_project "$tmp/collisions/two/satchel")"
 registry="$(repository_registry_file)"
 jq '.["example.com/conflict"]={status:"tracked",project:"satchel"}' "$registry" \
   > "$registry.tmp" && mv "$registry.tmp" "$registry"
-! (validate_project_state 2>/dev/null)
+refute validate_project_state
 jq 'del(.["example.com/conflict"])' "$registry" > "$registry.tmp" && mv "$registry.tmp" "$registry"
 touch "$SATCHEL_DIR/sync/projects/sample/project.json"
-! (validate_project_state 2>/dev/null)
+refute validate_project_state
 rm "$SATCHEL_DIR/sync/projects/sample/project.json"
 printf '{"paths":{"/missing":{"project":"missing"}}}\n' \
   > "$SATCHEL_DIR/sync/machines/other/projects.json"
-! (validate_project_state 2>/dev/null)
+refute validate_project_state
 printf '{"paths":{}}\n' > "$SATCHEL_DIR/sync/machines/other/projects.json"
 validate_project_state
 
@@ -337,11 +345,11 @@ jq 'del(.["example.com/newer"]) | .["github.com/example/app"] |= del(.note)' "$r
 
 jq '.["example.com/bad"]={status:"tracked"}' "$registry" \
   > "$registry.tmp" && mv "$registry.tmp" "$registry"
-! (validate_project_state 2>/dev/null)     # tracked still requires a project id
+refute validate_project_state     # tracked still requires a project id
 jq 'del(.["example.com/bad"])' "$registry" > "$registry.tmp" && mv "$registry.tmp" "$registry"
 jq '.["example.com/bad"]={status:"weird"}' "$registry" \
   > "$registry.tmp" && mv "$registry.tmp" "$registry"
-! (validate_project_state 2>/dev/null)     # unknown status is still a hard error
+refute validate_project_state     # unknown status is still a hard error
 jq 'del(.["example.com/bad"])' "$registry" > "$registry.tmp" && mv "$registry.tmp" "$registry"
 
 printf '{"paths":{"/somewhere":{"project":"sample","seenAt":"2026-01-01"}}}\n' \
@@ -355,7 +363,7 @@ validate_project_state
 status="$(cmd_status 2>/dev/null)"
 grep -q 'sample.*github.com/example/app' <<< "$status"
 grep -q 'ignored repositories: 2.*status --ignored' <<< "$status"
-! grep -q 'github.com/example/junk' <<< "$status"
+refute grep -q 'github.com/example/junk' <<< "$status"
 ignored_status="$(cmd_status --ignored 2>/dev/null)"
 grep -q 'github.com/example/junk' <<< "$ignored_status"
 grep -q 'github.com/example/remove-me' <<< "$ignored_status"

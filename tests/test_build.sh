@@ -2,6 +2,7 @@
 set -euo pipefail
 
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$repo_dir/tests/lib.sh"
 tmp="$(mktemp -d)"
 trap 'rm -r "$tmp"' EXIT
 
@@ -16,7 +17,7 @@ bash "$tmp/scripts/build.sh" --check
 # Drift is rejected, a normal build repairs it, and the result remains an
 # executable, syntactically valid, self-contained artifact.
 printf '\n# test-only drift\n' >> "$tmp/src/51-skills.sh"
-! bash "$tmp/scripts/build.sh" --check >/dev/null 2>&1
+refute bash "$tmp/scripts/build.sh" --check
 bash "$tmp/scripts/build.sh"
 bash "$tmp/scripts/build.sh" --check
 [ -x "$tmp/satchel" ]

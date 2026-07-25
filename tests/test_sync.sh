@@ -2,6 +2,7 @@
 set -euo pipefail
 
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$repo_dir/tests/lib.sh"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
@@ -53,8 +54,10 @@ cmd_skills remove removable >/dev/null 2>&1
 [ ! -e "$SYNC_DIR/skills/shared/removable" ]
 [ "$(git_sync log -1 --format=%s)" = "skills: remove removable" ]
 [ "$(origin_head)" = "$(git_sync rev-parse HEAD)" ]
-! git -C "$tmp/origin.git" ls-tree -r --name-only main \
-  | grep -q '^skills/shared/removable/'
+if git -C "$tmp/origin.git" ls-tree -r --name-only main \
+   | grep -q '^skills/shared/removable/'; then
+  fail "removed skill is still present in the pushed tree"
+fi
 
 other="$tmp/other"
 git clone -q "$tmp/origin.git" "$other"
@@ -86,7 +89,7 @@ git -C "$other" push -q
 rc=0
 pull_output="$(quiet_pull 2>&1)" || rc=$?
 [ "$rc" -eq 0 ]                                  # startup continues
-! sync_needs_recovery                            # and the clone is clean again
+refute sync_needs_recovery                            # and the clone is clean again
 [ -z "$(git_sync diff --name-only --diff-filter=U)" ]
 grep -q 'backed out rather than guess' <<< "$pull_output"
 grep -q '^local$' "$SYNC_DIR/conflict"           # local work survives
@@ -104,11 +107,11 @@ git -C "$other" -c user.name=o -c user.email=o@o commit -qam "remote conflict 2"
 git -C "$other" push -q
 git_sync pull --rebase >/dev/null 2>&1 || true
 sync_needs_recovery
-! git_sync rev-parse --abbrev-ref '@{u}' >/dev/null 2>&1   # HEAD really is detached
+refute git_sync rev-parse --abbrev-ref '@{u}'   # HEAD really is detached
 rc=0
 quiet_pull >/dev/null 2>&1 || rc=$?
 [ "$rc" -eq 0 ]
-! sync_needs_recovery
+refute sync_needs_recovery
 git_sync reset -q --hard origin/main
 
 # Two machines editing the same shared registry between syncs conflicts. Satchel
@@ -130,7 +133,7 @@ git -C "$other" push -q
 rc=0
 pull_output="$(quiet_pull 2>&1)" || rc=$?
 [ "$rc" -eq 0 ]                                  # startup is never blocked
-! sync_needs_recovery                            # and never left mid-rebase
+refute sync_needs_recovery                            # and never left mid-rebase
 [ -z "$(git_sync diff --name-only --diff-filter=U)" ]
 grep -q 'backed out rather than guess' <<< "$pull_output"
 grep -q 'nothing local was lost' <<< "$pull_output"
@@ -173,7 +176,7 @@ printf 'remote\n' > "$other/finalize-conflict"
 git -C "$other" -c user.name=o -c user.email=o@o commit -qam "remote finalize conflict"
 git -C "$other" push -q
 push_output="$(quiet_push "session: finalize conflict" 2>&1)"
-! sync_needs_recovery
+refute sync_needs_recovery
 grep -q 'committed locally' <<< "$push_output"
 grep -q '^local$' "$SYNC_DIR/finalize-conflict"
 [ "$(git_sync log -1 --format=%s)" = "session: finalize conflict" ]
@@ -201,7 +204,7 @@ git -C "$other" pull -q --rebase
 SYNC_DEGRADED=0
 degrade_sync "test reason" >/dev/null 2>&1
 [ "$SYNC_DEGRADED" -eq 1 ]
-! sync_ready
+refute sync_ready
 quiet_push "must be a no-op" >/dev/null 2>&1
 SYNC_DEGRADED=0
 sync_ready

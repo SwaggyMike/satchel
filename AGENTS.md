@@ -105,6 +105,14 @@ bash tests/run.sh
 ```
 
 Every bug fix needs a regression test that fails for the original defect.
+**Verify that by reverting the fix and watching the test fail** — an assertion
+that has never failed is not evidence.
+
+Never write a negative assertion as `! some_command`. POSIX exempts a command
+from `set -e` when its return value is inverted with `!`, so it always passes.
+Use `refute` from `tests/lib.sh`, or an explicit `if cond; then fail "..."; fi`
+for pipelines and compound commands.
+
 Tests should:
 
 - create state under `mktemp -d` and clean it with a trap;

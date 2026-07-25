@@ -2,6 +2,7 @@
 set -euo pipefail
 
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$repo_dir/tests/lib.sh"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
@@ -104,9 +105,9 @@ HOST_MODE=0
 mkdir -p "$SATCHEL_DIR/home/claude" "$tmp/work/project-files"
 ownership_path_allowed "$SATCHEL_DIR/home/claude"
 ownership_path_allowed "$SATCHEL_DIR/sync/skills/shared"
-! ownership_path_allowed "$tmp/work/project-files"
+refute ownership_path_allowed "$tmp/work/project-files"
 podman_rootless() { return 0; }
-! (fix_home_ownership "$tmp/work/project-files" 2>/dev/null)
+refute fix_home_ownership "$tmp/work/project-files"
 podman_rootless() { return 1; }
 
 # Ownership detection uses portable find features and stops after the first
@@ -147,26 +148,33 @@ grep -q 'cannot be fixed from inside' <(ownership_note)
 
 # A Host Session runs as root, so there is no mismatch to explain.
 HOST_MODE=1
-! grep -q 'cannot be fixed from inside' <(ownership_note)
+refute grep -q 'cannot be fixed from inside' <(ownership_note)
 HOST_MODE=0
 
 # A root host that also runs sessions as root has nothing to explain either.
 saved_session_uid="$SATCHEL_UID"; SATCHEL_UID=0
-! grep -q 'cannot be fixed from inside' <(ownership_note)
+refute grep -q 'cannot be fixed from inside' <(ownership_note)
 SATCHEL_UID="$saved_session_uid"
 
 # An ordinary non-root host never sees it at all.
 unset -f id
-! grep -q 'cannot be fixed from inside' <(ownership_note)
+refute grep -q 'cannot be fixed from inside' <(ownership_note)
 
 # Synced registries reject path-special machine entries and malformed MCP
 # records before a session or sync can consume them.
 mkdir -p "$SATCHEL_DIR/sync/machines/..bad"
-! (validate_machine_state 2>/dev/null)
+refute validate_machine_state
 rmdir "$SATCHEL_DIR/sync/machines/..bad"
+# An unknown field is accepted on purpose, so a newer Satchel elsewhere in the
+# caravan cannot brick this machine (tests/test_mcp.sh covers that contract).
+# This assertion used to demand the opposite and never fired, because a leading
+# `!` is exempt from set -e.
 printf '{"servers":{"ok":{"url":"https://example.test","auth":"none","extra":true}}}\n' \
   > "$SATCHEL_DIR/sync/mcp.json"
-! (validate_mcp_state 2>/dev/null)
+validate_mcp_state
+# A record missing a field Satchel actually reads is still rejected.
+printf '{"servers":{"ok":{"auth":"none"}}}\n' > "$SATCHEL_DIR/sync/mcp.json"
+refute validate_mcp_state
 printf '{"servers":{"ok":{"url":"https://example.test","auth":"none"}}}\n' \
   > "$SATCHEL_DIR/sync/mcp.json"
 validate_mcp_state
@@ -206,7 +214,7 @@ grep -q 'nested-container setup' <<< "$nested_output"
 
 # Local-state deletion shares uninstall's exact target checks.
 validate_state_removal_path "$(readlink -f "$SATCHEL_DIR")" "$tmp/install"
-! (validate_state_removal_path "$(readlink -f "$tmp/work")" "$tmp/install" 2>/dev/null)
+refute validate_state_removal_path "$(readlink -f "$tmp/work")" "$tmp/install"
 
 # Session startup propagates an interrupted best-effort pull immediately.
 ensure_image() { :; }
@@ -441,7 +449,7 @@ saved_uid="$SATCHEL_UID"; saved_gid="$SATCHEL_GID"
 SATCHEL_UID="$(stat -c %u "$writable_dir")"; SATCHEL_GID="$(stat -c %g "$writable_dir")"
 session_can_write "$writable_dir"
 SATCHEL_UID=4242; SATCHEL_GID=4242
-! session_can_write "$writable_dir"          # not owner, not group, not world-writable
+refute session_can_write "$writable_dir"          # not owner, not group, not world-writable
 chmod 777 "$writable_dir"
 session_can_write "$writable_dir"            # world-writable is enough
 chmod 755 "$writable_dir"

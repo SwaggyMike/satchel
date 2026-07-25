@@ -2,6 +2,7 @@
 set -euo pipefail
 
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$repo_dir/tests/lib.sh"
 tmp="$(mktemp -d)"
 cleanup() { [ -n "${SSH_AGENT_PID:-}" ] && kill "$SSH_AGENT_PID" 2>/dev/null; rm -rf "$tmp"; }
 trap cleanup EXIT
@@ -68,12 +69,16 @@ start_temporary_ssh_agent >/dev/null 2>&1 || rc=$?
 [ -z "$TEMP_SSH_AGENT_DIR" ]
 rm "$HOME/.ssh/id_ed25519"
 
+refute_state() { # a forwarded socket is used only when an agent answers on it
+  if SSH_STATE="$1" ssh_forwarding; then fail "ssh_forwarding should be false for state $1"; fi
+}
+
 # The socket is mounted only when an agent answers on it.
 SSH_STATE=ready ssh_forwarding
 SSH_STATE=empty ssh_forwarding
-! SSH_STATE=dead  ssh_forwarding
-! SSH_STATE=none  ssh_forwarding
-! SSH_STATE=off   ssh_forwarding
+refute_state dead
+refute_state none
+refute_state off
 
 SSH_STATE=empty compose_run_args claude "$tmp/home_c" "$tmp/work/app"
 [[ " ${RUN_ARGS[*]} " == *"/run/ssh-agent.sock"* ]]
@@ -92,12 +97,12 @@ grep -q 'ssh-agent is forwarded' <(preamble ready)
 grep -q 'ssh/config is NOT mounted' <(preamble ready)
 grep -q 'ssh-add -l' <(preamble ready)
 grep -q 'Permission denied (publickey)' <(preamble ready)
-! grep -q 'works normally' <(preamble ready)
+refute grep -q 'works normally' <(preamble ready)
 
 grep -q 'Permission denied (publickey)' <(preamble empty)
 grep -q 'ssh-add' <(preamble empty)
 grep -q 'ssh/config is not mounted' <(preamble empty)
-! grep -q 'works normally' <(preamble empty)
+refute grep -q 'works normally' <(preamble empty)
 grep -q 'cannot authenticate' <(preamble dead)
 grep -q 'cannot authenticate' <(preamble none)
 grep -q 'cannot authenticate' <(preamble off)
@@ -129,7 +134,7 @@ HOST_MODE=0
 # align the passwd homes of node and root with the mounted agent home. A direct
 # field rewrite works while root is Docker's active PID 1; usermod does not.
 grep -q "RUN sed -Ei .*root|node.* /etc/passwd" "$repo_dir/satchel"
-! grep -q 'usermod -d /home/satchel root' "$repo_dir/satchel"
+refute grep -q 'usermod -d /home/satchel root' "$repo_dir/satchel"
 passwd_fixture="$tmp/passwd"
 printf 'root:x:0:0:root:/root:/bin/bash\nnode:x:1000:1000::/home/node:/bin/bash\n' > "$passwd_fixture"
 sed -Ei 's#^((root|node):[^:]*:[^:]*:[^:]*:[^:]*:)[^:]*:#\1/home/satchel:#' "$passwd_fixture"

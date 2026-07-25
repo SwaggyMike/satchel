@@ -2,6 +2,7 @@
 set -euo pipefail
 
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$repo_dir/tests/lib.sh"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
@@ -19,12 +20,12 @@ load_config
 printf '{"servers":{"ok":{"url":"https://example.test/mcp","auth":"none"}}}\n' > "$MCP_FILE"
 validate_mcp_state
 mcp_url_valid "https://example.test/mcp"
-! mcp_url_valid 'https://example.test/"bad'
-! mcp_url_valid 'https://example.test/\bad'
+refute mcp_url_valid 'https://example.test/"bad'
+refute mcp_url_valid 'https://example.test/\bad'
 printf '{"servers":{"bad":{"url":"https://example.test/\\"bad","auth":"none"}}}\n' > "$MCP_FILE"
-! (validate_mcp_state 2>/dev/null)
+refute validate_mcp_state
 printf '{"servers":{"bad":{"url":"https://example.test/\\nbad","auth":"none"}}}\n' > "$MCP_FILE"
-! (validate_mcp_state 2>/dev/null)
+refute validate_mcp_state
 
 # The registry is synced, so a newer Satchel on another machine may add fields
 # this version does not know. Unknown keys are ignored; required ones are still
@@ -32,9 +33,9 @@ printf '{"servers":{"bad":{"url":"https://example.test/\\nbad","auth":"none"}}}\
 printf '{"servers":{"ok":{"url":"https://example.test/mcp","auth":"none","timeout":30}},"version":2}\n' > "$MCP_FILE"
 validate_mcp_state
 printf '{"servers":{"ok":{"auth":"none"}}}\n' > "$MCP_FILE"
-! (validate_mcp_state 2>/dev/null)                       # url is still required
+refute validate_mcp_state                       # url is still required
 printf '{"servers":{"ok":{"url":"https://example.test/mcp","auth":"basic"}}}\n' > "$MCP_FILE"
-! (validate_mcp_state 2>/dev/null)                       # auth is still constrained
+refute validate_mcp_state                       # auth is still constrained
 
 # A valid managed block is replaced while unrelated settings on both sides
 # remain intact.
@@ -52,7 +53,7 @@ materialize_mcp codex "$codex_home"
 grep -q '^sandbox_mode = "workspace-write"$' "$codex_home/.codex/config.toml"
 grep -q '^model_reasoning_effort = "low"$' "$codex_home/.codex/config.toml"
 grep -q '^url = "https://example.test/mcp"$' "$codex_home/.codex/config.toml"
-! grep -q 'old managed content' "$codex_home/.codex/config.toml"
+refute grep -q 'old managed content' "$codex_home/.codex/config.toml"
 
 # An interrupted or manually damaged marker pair never causes the tail of the
 # user's Codex config to be discarded.
@@ -63,7 +64,7 @@ incomplete managed content
 model_reasoning_effort = "high"
 EOF
 cp "$codex_home/.codex/config.toml" "$tmp/config-before"
-! (materialize_mcp codex "$codex_home" 2>/dev/null)
+refute materialize_mcp codex "$codex_home"
 cmp "$tmp/config-before" "$codex_home/.codex/config.toml"
 [ ! -e "$codex_home/.codex/config.toml.tmp" ]
 [ ! -e "$codex_home/.codex/config.toml.rescued" ]
