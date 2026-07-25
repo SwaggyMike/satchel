@@ -88,10 +88,16 @@ cmd_doctor() {
   # so identical Satchel versions can still run different agents. Name it here
   # rather than letting it surface as "it works on the other box".
   if sync_ready; then
-    local m mv mc ma mine skew=0
+    local m mv mc ma mine d skew=0 reported=0 others=0
+    for d in "$SYNC_DIR"/machines/*/; do
+      [ -d "$d" ] || continue
+      [ "$(basename "$d")" != "$MACHINE" ] || continue
+      others=$((others + 1))
+    done
     mine="$(cached_image_agents)"
     while IFS=$'\t' read -r m mv mc ma; do
       [ -n "$m" ] && [ "$m" != "$MACHINE" ] || continue
+      reported=$((reported + 1))
       if [ "$mv" != "$SATCHEL_VERSION" ]; then
         d_warn "caravan: $m runs satchel $mv, this machine runs $SATCHEL_VERSION — 'satchel update' on the older one"
         skew=1
@@ -100,7 +106,16 @@ cmd_doctor() {
         skew=1
       fi
     done < <(caravan_environments)
-    [ "$skew" -eq 1 ] || d_ok "caravan: no version drift detected"
+    # Having compared nothing is not the same as having found nothing. A
+    # machine only publishes its versions when a session ends there, so say
+    # plainly when there is no data yet instead of reporting a green result.
+    if [ "$others" -eq 0 ]; then
+      :
+    elif [ "$reported" -eq 0 ]; then
+      d_warn "caravan: $others other machine(s) have not reported versions yet — run a session on each so drift can be compared"
+    elif [ "$skew" -eq 0 ]; then
+      d_ok "caravan: no drift across $reported reporting machine(s)"
+    fi
   fi
 
   # Unraid rebuilds / and /root from flash at every boot, so anything Satchel

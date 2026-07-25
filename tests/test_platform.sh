@@ -184,4 +184,43 @@ grep -q 'boot persistence block present' <<< "$report" \
 grep -q 'is not under /mnt' <<< "$report" \
   || fail "doctor did not flag non-persistent state on Unraid"
 
+# Drift reporting must distinguish "compared and agreed" from "nothing to
+# compare". Reporting green off an empty data set is the failure this check
+# exists to prevent, and it did exactly that on first real use.
+sync_dir_for_drift="$SATCHEL_DIR/sync"
+mkdir -p "$sync_dir_for_drift/machines/tower"
+SYNC_URL=x; git init -q "$sync_dir_for_drift" 2>/dev/null || true
+sync_ready || fail "drift fixture is not sync_ready"
+
+# The `|| true` must sit OUTSIDE the substitution: die() exits the subshell,
+# so an inner guard never runs. This has been the single most repeated
+# mistake in this codebase.
+drift_report() { DOCTOR_PROBLEMS=0; cmd_doctor 2>&1; }
+
+# A single-machine caravan says nothing at all — there is no peer to compare to.
+report="$(drift_report)" || true
+if grep -q 'caravan:' <<< "$report"; then fail "single-machine caravan should stay quiet"; fi
+
+# A peer that has never reported must not read as agreement.
+mkdir -p "$sync_dir_for_drift/machines/laptop"
+report="$(drift_report)" || true
+grep -q 'have not reported versions yet' <<< "$report" \
+  || fail "an unreported peer must not be reported as no-drift"
+if grep -q 'no drift across' <<< "$report"; then fail "claimed agreement with no data"; fi
+
+# Once it reports and matches, that is a real green.
+printf '{"satchel":"%s","commit":"abc","engine":"docker","agents":"claude 1, codex 2"}\n' \
+  "$SATCHEL_VERSION" > "$sync_dir_for_drift/machines/laptop/environment.json"
+printf 'claude 1, codex 2\n' > "$IMAGE_AGENTS_FILE"
+report="$(drift_report)" || true
+grep -q 'no drift across 1 reporting machine' <<< "$report" \
+  || fail "matching versions should report agreement"
+
+# A genuine difference is named.
+printf '{"satchel":"%s","commit":"abc","engine":"docker","agents":"claude 9, codex 9"}\n' \
+  "$SATCHEL_VERSION" > "$sync_dir_for_drift/machines/laptop/environment.json"
+report="$(drift_report)" || true
+grep -q 'laptop has \[claude 9, codex 9\]' <<< "$report" \
+  || fail "agent drift was not named"
+
 printf 'ok: unraid detection, boot persistence, and key backup\n'
