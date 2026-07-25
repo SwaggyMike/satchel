@@ -69,6 +69,47 @@ start_temporary_ssh_agent >/dev/null 2>&1 || rc=$?
 [ -z "$TEMP_SSH_AGENT_DIR" ]
 rm "$HOME/.ssh/id_ed25519"
 
+# ssh-agent serves only peers whose euid is 0 or matches its own uid, so an
+# agent started by root is unreachable from a uid-SATCHEL_UID session no matter
+# who owns the socket. Satchel used to chown the socket and call that solved,
+# which announced a dead-on-arrival agent to the session as working.
+# These checks pin the two halves of the fix: the agent is started through the
+# privilege drop, and "ready" is only claimed after proving it answers there.
+agent_start_line="$(grep -n 'ssh-agent -a "\$sock"' "$repo_dir/satchel" | head -n 1)"
+[ -n "$agent_start_line" ] || fail "could not find the temporary agent's start line"
+case "$agent_start_line" in
+  *as_session_uid*) ;;
+  *) fail "the temporary ssh-agent must start via as_session_uid: $agent_start_line" ;;
+esac
+refute_grep 'chown "\$SATCHEL_UID:\$SATCHEL_GID" "\$TEMP_SSH_AGENT_DIR" "\$sock"' "$repo_dir/satchel"
+
+# A root-run host without setpriv cannot own an agent as the session's uid;
+# claiming otherwise is the failure mode this whole path exists to avoid.
+id() { echo 0; }
+HOST_MODE=0
+command() { if [ "${2:-}" = setpriv ]; then return 1; fi; builtin command "$@"; }
+refute can_serve_session_uid
+refute start_temporary_ssh_agent
+unset -f command
+# With setpriv present the capability check passes again.
+can_serve_session_uid
+unset -f id
+HOST_MODE=0
+
+# "ready" must survive only when the agent actually answers as the session uid.
+# A key that loads but an agent that refuses the probe is not a usable agent.
+mkdir -p "$HOME/.ssh"
+touch "$HOME/.ssh/id_ed25519"
+printf '#!/bin/sh\ncase "$1" in -l) exit 2 ;; esac\nexit 0\n' > "$stub/ssh-add"
+chmod +x "$stub/ssh-add"
+SSH_STATE=none
+rc=0
+start_temporary_ssh_agent >/dev/null 2>&1 || rc=$?
+[ "$rc" -ne 0 ] || fail 'start_temporary_ssh_agent claimed success while the agent refused the session-uid probe'
+[ "$SSH_STATE" != ready ] || fail 'SSH_STATE must not be ready when the agent is unreachable'
+[ -z "$TEMP_SSH_AGENT_PID" ] || fail 'a rejected agent must be cleaned up'
+rm "$HOME/.ssh/id_ed25519"
+
 refute_state() { # a forwarded socket is used only when an agent answers on it
   if SSH_STATE="$1" ssh_forwarding; then fail "ssh_forwarding should be false for state $1"; fi
 }

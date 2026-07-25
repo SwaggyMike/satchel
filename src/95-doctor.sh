@@ -41,13 +41,22 @@ cmd_doctor() {
   elif [ "$blob" = "$(script_blob)" ]; then d_ok "script: up to date with GitHub main"
   else d_warn "script: GitHub main has a newer satchel - run 'satchel update'"; fi
 
+  # Probed as the session's uid, so "ready" means the sandbox can reach it -
+  # not merely that root can.
   case "$(ssh_agent_state)" in
     ready) d_ok   "ssh-agent: keys loaded - sessions can push over SSH" ;;
     empty) d_warn "ssh-agent: reachable but no keys loaded - run 'ssh-add' so sessions can push over SSH" ;;
-    dead)  d_warn "ssh-agent: SSH_AUTH_SOCK is set but no agent answered" ;;
+    dead)  if session_uid_differs; then
+             d_warn "ssh-agent: no agent answers as uid $SATCHEL_UID - a root-owned agent cannot serve a sandbox session; Satchel starts its own from \$HOME/.ssh"
+           else
+             d_warn "ssh-agent: SSH_AUTH_SOCK is set but no agent answered"
+           fi ;;
     none)  d_warn "ssh-agent: not running - sessions cannot push over SSH" ;;
     off)   d_ok   "ssh forwarding: disabled (SATCHEL_SSH=0)" ;;
   esac
+  if ! can_serve_session_uid; then
+    d_warn "setpriv: missing - sessions running as uid $SATCHEL_UID cannot be given an ssh-agent (install util-linux)"
+  fi
 
   local a
   for a in claude codex; do

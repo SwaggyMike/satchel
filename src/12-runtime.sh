@@ -91,6 +91,35 @@ SSH_STATE=""
 TEMP_SSH_AGENT_PID=""
 TEMP_SSH_AGENT_DIR=""
 
+# ssh-agent authenticates its clients by peer credentials, not by file mode:
+# it serves a connection only when the peer's euid is 0 or equals the agent
+# process's own uid, and otherwise closes the socket ("uid mismatch: peer euid
+# %u != uid %u"). A root-started agent therefore refuses the uid-$SATCHEL_UID
+# session however the socket is owned, and chowning the socket cannot change
+# that - the agent process itself has to run as the uid it will serve.
+#
+# So every probe of, and every write to, an agent has to happen as the uid the
+# session will run as. Judging reachability as root is how a dead-on-arrival
+# socket used to be announced to the session as working.
+session_uid_differs() {
+  [ "$(id -u)" -eq 0 ] && [ "$HOST_MODE" -eq 0 ]
+}
+
+as_session_uid() { # as_session_uid <command...> — run it as the session's uid
+  if session_uid_differs; then
+    setpriv --reuid="$SATCHEL_UID" --regid="$SATCHEL_GID" --clear-groups "$@"
+  else
+    "$@"
+  fi
+}
+
+# Dropping privileges needs setpriv (numeric uid, no login, no PAM). runuser
+# and su both want a passwd name, which a custom SATCHEL_UID need not have.
+can_serve_session_uid() {
+  session_uid_differs || return 0
+  command -v setpriv >/dev/null 2>&1
+}
+
 standard_private_keys() {
   local key
   for key in id_ed25519 id_ecdsa id_rsa; do
@@ -115,14 +144,40 @@ stop_temporary_ssh_agent() {
   export SSH_AUTH_SOCK
 }
 
+# Root can read a key file that the session's uid cannot, but ssh-add has to
+# run as the session's uid to be served by the agent at all. Opening the file
+# here and letting the descriptor survive the privilege drop gets the key to
+# the agent without copying it to any path the sandbox could read.
+add_standard_keys() { # add_standard_keys <key>... — load keys into the temp agent
+  local key rc=0
+  if ! session_uid_differs; then
+    ssh-add -q "$@" || rc=$?
+    return "$rc"
+  fi
+  for key in "$@"; do
+    rc=0
+    as_session_uid ssh-add -q - < "$key" || rc=$?
+    [ "$rc" -eq 0 ] || return "$rc"
+  done
+  return 0
+}
+
 start_temporary_ssh_agent() {
   local out sock pid key rc=0
   local keys=()
   while IFS= read -r key; do keys+=("$key"); done < <(standard_private_keys)
   [ ${#keys[@]} -gt 0 ] || return 1
+  can_serve_session_uid || return 1
   TEMP_SSH_AGENT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/satchel-ssh-agent.XXXXXX")"
   sock="$TEMP_SSH_AGENT_DIR/agent.sock"
-  out="$(ssh-agent -a "$sock" -s 2>/dev/null)" || rc=$?
+  # Hand the directory over before the agent starts: it binds the socket as the
+  # session's uid and has to be able to create it in there.
+  if session_uid_differs && ! chown "$SATCHEL_UID:$SATCHEL_GID" "$TEMP_SSH_AGENT_DIR"; then
+    rmdir -- "$TEMP_SSH_AGENT_DIR" 2>/dev/null || true
+    TEMP_SSH_AGENT_DIR=""
+    return 1
+  fi
+  out="$(as_session_uid ssh-agent -a "$sock" -s 2>/dev/null)" || rc=$?
   if [ "$rc" -ne 0 ]; then
     rmdir -- "$TEMP_SSH_AGENT_DIR" 2>/dev/null || true
     TEMP_SSH_AGENT_DIR=""
@@ -139,18 +194,17 @@ start_temporary_ssh_agent() {
   SSH_AUTH_SOCK="$sock"
   export SSH_AUTH_SOCK
   rc=0
-  ssh-add -q "${keys[@]}" || rc=$?
+  add_standard_keys "${keys[@]}" || rc=$?
   if [ "$rc" -eq 0 ]; then
-    # Root-run hosts launch normal sessions as SATCHEL_UID. This socket belongs
-    # only to the current session, so grant that exact user access to it.
-    if [ "$(id -u)" -eq 0 ] && [ "$HOST_MODE" -eq 0 ]; then
-      if ! chown "$SATCHEL_UID:$SATCHEL_GID" "$TEMP_SSH_AGENT_DIR" "$sock"; then
-        stop_temporary_ssh_agent
-        return 1
-      fi
+    # "ready" is repeated to the session as a promise that pushing works, so
+    # prove the agent answers the uid the session runs as before making it.
+    # This is the check whose absence let a root-owned agent be announced as
+    # forwarded and working when no client inside the sandbox could reach it.
+    if as_session_uid ssh-add -l >/dev/null 2>&1; then
+      SSH_STATE=ready
+      return 0
     fi
-    SSH_STATE=ready
-    return 0
+    rc=1
   fi
   stop_temporary_ssh_agent
   [ "$rc" -eq 130 ] && return 130
@@ -169,7 +223,10 @@ ssh_agent_state() {
   if [ "${SATCHEL_SSH:-1}" = 0 ]; then printf 'off'; return 0; fi
   if [ ! -S "${SSH_AUTH_SOCK:-}" ]; then printf 'none'; return 0; fi
   local rc=0
-  ssh-add -l >/dev/null 2>&1 || rc=$?
+  # As the session's uid, not Satchel's: an agent root can talk to is not
+  # necessarily one the session can, and the session's view is the one that
+  # decides whether git push works.
+  as_session_uid ssh-add -l >/dev/null 2>&1 || rc=$?
   case "$rc" in
     0) printf 'ready' ;;
     1) printf 'empty' ;;
@@ -209,6 +266,11 @@ ssh_preflight() { # ssh_preflight [agent] — agent only sharpens the guidance
   if [ "$shared_agent_refused" -eq 1 ] && [ ${#keys[@]} -eq 0 ]; then
     warn "this host's ssh-agent belongs to root and cannot be shared with a uid-$SATCHEL_UID session"
     warn "save a standard key at \$HOME/.ssh/id_ed25519 for Satchel to load, or use 'satchel --host $agent' when you need root's agent"
+  fi
+  # Without setpriv there is no way to own an agent as the session's uid, so
+  # say that plainly instead of reporting "no key" for a key that is present.
+  if ! can_serve_session_uid; then
+    warn "setpriv is missing, so no ssh-agent can be started as uid $SATCHEL_UID — install util-linux, or use 'satchel --host $agent'"
   fi
 
   case "$state" in
