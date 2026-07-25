@@ -108,6 +108,16 @@ Every bug fix needs a regression test that fails for the original defect.
 **Verify that by reverting the fix and watching the test fail** — an assertion
 that has never failed is not evidence.
 
+Rebuild before every such check. Tests source the built `satchel`, not `src/`,
+so editing a module and running `tests/run.sh` without `scripts/build.sh` in
+between silently exercises the previous artifact: the revert appears to pass
+and the guard looks worthless when it is not.
+
+`bash -x` is not a usable way to find a failing assertion here. Several tests
+capture a function's output with `2>&1` and assert it is empty; the trace
+itself lands in that capture and fails them. Use an `ERR` trap instead:
+`bash -c 'set -E; trap "echo line \$LINENO >&2" ERR; . tests/test_x.sh'`.
+
 Never write a negative assertion as `! some_command`. POSIX exempts a command
 from `set -e` when its return value is inverted with `!`, so it always passes.
 Use `refute` from `tests/lib.sh`, or an explicit `if cond; then fail "..."; fi`

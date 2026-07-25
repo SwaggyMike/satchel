@@ -272,13 +272,29 @@ grep -q 'Other work' "$machine_combined"
 )
 
 # Handoff directories are bounded continuation state, not an incident archive.
+# Sized off HANDOFF_RETENTION so raising the bound cannot silently stop
+# exercising it. Stamps only have to sort; pruning orders by filename.
 mkdir -p "$SATCHEL_DIR/sync/projects/retained/handoffs"
-for i in $(seq -w 1 12); do
-  file_handoff retained "2026-04-${i}T00:00:00Z" $'## Goal\nretention test' 2>/dev/null
+retention_stamp() { printf '2026-04-01T%02d:%02d:00Z' "$(($1 / 60))" "$(($1 % 60))"; }
+for i in $(seq 1 $((HANDOFF_RETENTION + 2))); do
+  file_handoff retained "$(retention_stamp "$i")" $'## Goal\nretention test' 2>/dev/null
 done
-[ "$(find "$SATCHEL_DIR/sync/projects/retained/handoffs" -type f -name '*.md' | wc -l)" = "$HANDOFF_RETENTION" ]
-[ ! -f "$SATCHEL_DIR/sync/projects/retained/handoffs/2026-04-01T00-00-00Z--testbox.md" ]
-[ -f "$SATCHEL_DIR/sync/projects/retained/handoffs/2026-04-12T00-00-00Z--testbox.md" ]
+retained_dir="$SATCHEL_DIR/sync/projects/retained/handoffs"
+[ "$(find "$retained_dir" -type f -name '*.md' | wc -l)" = "$HANDOFF_RETENTION" ]
+oldest_stamp="$(retention_stamp 1)"; newest_stamp="$(retention_stamp $((HANDOFF_RETENTION + 2)))"
+[ ! -f "$retained_dir/${oldest_stamp//:/-}--testbox.md" ]
+[ -f "$retained_dir/${newest_stamp//:/-}--testbox.md" ]
+
+# A handoff whose first line lost its date= header still has to be ranked and
+# still has to count. Ranking by body skipped it entirely — tab is IFS
+# whitespace, so its leading-tab line parsed as date=<path> with an empty path,
+# which the loop's empty guard dropped. Nothing pruned, nothing counted, and the
+# directory grew past the bound one immortal file at a time.
+newest_untagged="$retained_dir/2026-12-31T23-59-59Z--testbox.md"
+printf '## Goal\ntruncated header\n' > "$newest_untagged"
+prune_handoffs "$retained_dir" >/dev/null
+[ -f "$newest_untagged" ]
+[ "$(find "$retained_dir" -type f -name '*.md' | wc -l)" = "$HANDOFF_RETENTION" ]
 
 # Global untracking ignores a portable origin, clears every machine's path
 # cache, and removes the active Project and handoffs.

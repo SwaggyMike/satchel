@@ -47,7 +47,7 @@ WITH_DIRS=()
 ENGINE=""
 BASELINE_VERSION=2
 MACHINE_NOTES_WORD_LIMIT=750
-HANDOFF_RETENTION=10
+HANDOFF_RETENTION=100
 SYNC_BLOCK_REASON=""
 # Set when the Sync Repo is broken beyond automatic repair. Sessions still run;
 # only syncing stops. See degrade_sync.
@@ -2138,9 +2138,19 @@ EOF
 }
 
 prune_handoffs() { # prune_handoffs <handoff-dir> → prints count removed
-  local dir="$1" kept=0 removed=0 f date
+  # Newest first by filename, not by a date= read out of each body: file_handoff
+  # derives the name from the same timestamp it writes into that header, and both
+  # naming schemes ('<date>.md', '<date>--<machine>.md') sort lexically in date
+  # order. Retention is high enough that a sed per file would be felt.
+  #
+  # Ranking by body also had a latent bug. It emitted "<date>\t<path>" and read
+  # it back with IFS=$'\t' — but Bash counts tab as IFS *whitespace*, so a file
+  # with no date= produced a leading-tab line that parsed as date=<path>, f=''.
+  # The empty-f guard then skipped it: an undated handoff was never pruned and
+  # never counted toward retention, so the directory grew past the bound.
+  local dir="$1" kept=0 removed=0 f
   [ -d "$dir" ] || { printf '0'; return 0; }
-  while IFS=$'\t' read -r date f; do
+  while IFS= read -r f; do
     [ -n "$f" ] || continue
     kept=$((kept + 1))
     if [ "$kept" -gt "$HANDOFF_RETENTION" ]; then
@@ -2150,8 +2160,7 @@ prune_handoffs() { # prune_handoffs <handoff-dir> → prints count removed
   done < <(
     for f in "$dir"/*.md; do
       [ -f "$f" ] || continue
-      date="$(sed -n '1s/.*date=\([^ ]*\).*/\1/p' "$f")"
-      printf '%s\t%s\n' "$date" "$f"
+      printf '%s\n' "$f"
     done | sort -r
   )
   printf '%s' "$removed"

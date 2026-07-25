@@ -47,7 +47,7 @@ WITH_DIRS=()
 ENGINE=""
 BASELINE_VERSION=2
 MACHINE_NOTES_WORD_LIMIT=750
-HANDOFF_RETENTION=10
+HANDOFF_RETENTION=100
 SYNC_BLOCK_REASON=""
 # Set when the Sync Repo is broken beyond automatic repair. Sessions still run;
 # only syncing stops. See degrade_sync.

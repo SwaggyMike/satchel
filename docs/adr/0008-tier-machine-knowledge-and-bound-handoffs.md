@@ -27,9 +27,13 @@ became harder to find as startup context grew.
   requests it. Agents may record a clearly qualifying fact proactively, must
   default to saving nothing when uncertain, and report knowledge-file changes
   in their final response.
-- Handoff directories retain the latest ten files per project or machine.
-  Older handoffs remain recoverable from Git history; the active tree is not
-  an incident archive.
+- Handoff directories retain the latest hundred files per project or machine.
+  Older handoffs remain recoverable from Git history. Ten was too few to read
+  back as a record of how a project got here, and nothing in a session scales
+  with the count: the preamble injects only the newest handoff, `satchel
+  status` prints only a count, and pruning orders files by name rather than
+  reading a date out of each one. A bound still exists because the active tree
+  is continuation state, not an incident archive.
 - The handoff writer always runs the agent's own default model at low
   reasoning effort. A configurable smaller model was tried and removed: a
   model that answers correctly on its own can still fail or drift out of the

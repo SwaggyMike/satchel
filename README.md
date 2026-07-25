@@ -79,8 +79,9 @@ work outside every project goes under the machine. Multi-project sessions
 see the list of visible projects and read each one's latest handoff on
 demand instead of loading them all up front. Nested work belongs to the nearest
 enclosing repo; multiple checkouts with the same origin share one Project.
-Each handoff directory keeps the latest ten files; older versions remain
-recoverable through Sync Repo history.
+Each handoff directory keeps the latest hundred files, enough to read back as a
+record of how a project got here; anything past that remains recoverable
+through Sync Repo history.
 
 The automatic handoff writer resumes the agent conversation with only that
 agent's local conversation home mounted. An empty temporary filesystem at the
