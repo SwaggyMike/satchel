@@ -8,13 +8,15 @@ HANDOFF_MARK='<!-- satchel-handoff'
 # machine instead of per project: machines/<name>/handoffs/. An empty
 # project id selects that machine scope.
 latest_handoff() { # latest_handoff <project-id> → prints newest handoff
-  local slug="$1" dir best="" best_date="" f date
+  local slug="$1" dir best="" f
   if [ -n "$slug" ]; then dir="$SYNC_DIR/projects/$slug/handoffs"
   else dir="$SYNC_DIR/machines/$MACHINE/handoffs"; fi
+  # file_handoff derives sortable filenames from the same UTC timestamp written
+  # into the header. Treat the filename as the durable ordering key everywhere:
+  # a truncated header must not make a retained newer handoff invisible.
   for f in "$dir"/*.md; do
     [ -f "$f" ] || continue
-    date="$(sed -n "1s/.*date=\([^ ]*\).*/\1/p" "$f")"
-    if [ -z "$best" ] || [[ "$date" > "$best_date" ]]; then best="$f"; best_date="$date"; fi
+    best="$f"
   done
   [ -n "$best" ] && printf '%s' "$best"
   return 0

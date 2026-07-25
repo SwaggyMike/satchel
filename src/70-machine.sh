@@ -9,13 +9,26 @@ baseline_skip_file()      { printf '%s/.baseline-skip' "$(machine_dir)"; }
 validate_machine_state() {
   valid_machine_name "$MACHINE" || die "unsafe machine name '$MACHINE'"
   [ -d "$SYNC_DIR/machines" ] || return 0
-  local entry name
+  local entry name environment
   while IFS= read -r -d '' entry; do
     [ -d "$entry" ] && [ ! -L "$entry" ] \
       || die "invalid machine entry: $entry"
     name="$(basename "$entry")"
     valid_machine_name "$name" \
       || die "unsafe machine directory '$name' in the Sync Repo"
+    environment="$entry/environment.json"
+    if [ -e "$environment" ] || [ -L "$environment" ]; then
+      [ -f "$environment" ] && [ ! -L "$environment" ] \
+        || die "invalid environment report for machine '$name'"
+      jq -e '
+        type == "object"
+        and (.satchel | type == "string") and (.satchel | length > 0)
+        and (.commit | type == "string")
+        and (.engine | type == "string")
+        and (.agents | type == "string")
+      ' "$environment" >/dev/null 2>&1 \
+        || die "invalid environment report for machine '$name'"
+    fi
   done < <(find -P "$SYNC_DIR/machines" -mindepth 1 -maxdepth 1 -print0)
 }
 
@@ -32,11 +45,17 @@ publish_machine_environment() {
   dir="$(machine_dir)"; mkdir -p "$dir"
   f="$(machine_environment_file)"
   [ ! -f "$SCRIPT_SHA_FILE" ] || commit="$(tr -cd 'a-f0-9' < "$SCRIPT_SHA_FILE" | cut -c1-7)"
-  jq -n --arg v "$SATCHEL_VERSION" --arg c "$commit" \
-        --arg e "${ENGINE:-}" --arg a "$(cached_image_agents)" \
-    '{satchel: $v, commit: $c, engine: $e, agents: $a}' > "$f.tmp" \
-    && mv -f "$f.tmp" "$f"
-  rm -f "$f.tmp"
+  if ! jq -n --arg v "$SATCHEL_VERSION" --arg c "$commit" \
+          --arg e "${ENGINE:-}" --arg a "$(cached_image_agents)" \
+      '{satchel: $v, commit: $c, engine: $e, agents: $a}' > "$f.tmp"; then
+    rm -f "$f.tmp"
+    return 1
+  fi
+  if [ -f "$f" ] && cmp -s "$f.tmp" "$f"; then
+    rm -f "$f.tmp"
+    return 0
+  fi
+  mv -f "$f.tmp" "$f"
   return 0
 }
 

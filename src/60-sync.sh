@@ -105,7 +105,11 @@ recover_sync_repo() {
     || git_sync merge --abort >/dev/null 2>&1 \
     || git_sync cherry-pick --abort >/dev/null 2>&1 \
     || git_sync revert --abort >/dev/null 2>&1 || true
-  git_sync reset -q --hard >/dev/null 2>&1 || true
+  # A rebase started with --autostash restores pre-existing tracked edits when
+  # aborted. Do not reset afterward merely to make the tree look clean: those
+  # edits can be the only surviving copy of work from an interrupted session.
+  # If aborting did not clear the operation or its unmerged entries, the check
+  # below fails and the caller degrades syncing instead of deleting anything.
   sync_needs_recovery && return 1
   return 0
 }

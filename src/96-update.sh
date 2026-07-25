@@ -39,8 +39,11 @@ cmd_update() {
   # the file between top-level commands — then resumes at the old offset inside
   # the new, longer file and executes a fragment of it. That is the normal
   # layout on Unraid, where /tmp is tmpfs and Satchel lives on the array.
-  tmp="$(mktemp "$(dirname "$self")/.satchel-update.XXXXXX")" \
-    || tmp="$(mktemp)"
+  tmp="$(mktemp "$(dirname "$self")/.satchel-update.XXXXXX" 2>/dev/null)" || {
+    warn "could not stage the update beside $self — leaving the running script untouched"
+    warn "make that directory writable by this user, then run 'satchel update' again"
+    return 1
+  }
   trap 'rm -f -- "$tmp"' EXIT
   curl -fsSL "https://raw.githubusercontent.com/$SATCHEL_REPO/$ref/satchel" -o "$tmp" || die "download failed"
   bash -n "$tmp" || die "downloaded script does not parse — not installing it"

@@ -15,11 +15,12 @@ fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
 export HOME="$tmp/home"
 export SATCHEL_DIR="$tmp/state"
-mkdir -p "$HOME/.ssh" "$SATCHEL_DIR" "$tmp/boot" "$tmp/bin"
+mkdir -p "$HOME/.ssh" "$SATCHEL_DIR" "$tmp/boot" "$tmp/bin" "$tmp/live-bin"
 printf 'MACHINE=tower\nSYNC_URL=\n' > "$SATCHEL_DIR/config"
 
 export SATCHEL_UNRAID_MARKER="$tmp/unraid-version"
 export SATCHEL_UNRAID_BOOT_DIR="$tmp/boot"
+export SATCHEL_UNRAID_LIVE_BIN_DIR="$tmp/live-bin"
 
 source <(sed '$d' "$repo_dir/satchel")
 load_config
@@ -55,6 +56,8 @@ write_unraid_boot_block "$go" || fail "write_unraid_boot_block failed"
 grep -qF "$BOOT_BLOCK_BEGIN" "$go" || fail "begin marker missing"
 grep -qF "$BOOT_BLOCK_END" "$go" || fail "end marker missing"
 grep -qF '/usr/local/emhttp/webGui/scripts/start' "$go" || fail "clobbered the user's existing go content"
+[ -L "$tmp/live-bin/satchel" ] || fail "current-boot command link was not written inside the fixture"
+[ "$(readlink "$tmp/live-bin/satchel")" = "$self" ] || fail "fixture command link points at the wrong install"
 
 # The block must restore the command, the key, AND known_hosts. The missing
 # known_hosts line is the exact drift that existed between install.sh and
@@ -63,6 +66,24 @@ grep -q "^ln -sf .*$install_dir/satchel.* /usr/local/bin/$" "$go" || fail "block
 grep -q 'mkdir -p /root/.ssh' "$go" || fail "block does not create /root/.ssh"
 grep -qF "cp $tmp/boot/ssh/root/id_ed25519* /root/.ssh/" "$go" || fail "block does not restore the key"
 grep -qF "cp $tmp/boot/ssh/root/known_hosts /root/.ssh/" "$go" || fail "block does not restore known_hosts"
+
+# Every path in the generated root boot script is shell data, not shell syntax.
+# Exercise the emitted commands with paths containing spaces and inspect the
+# argv seen by stubbed commands.
+saved_boot_dir="$UNRAID_BOOT_DIR"
+UNRAID_BOOT_DIR="$tmp/boot with spaces"
+spaced_self="$tmp/install with spaces/satchel"
+spaced_shim="$tmp/install with spaces/claude"
+spaced_block="$(unraid_boot_block_body "$spaced_self" "$spaced_shim")"
+UNRAID_BOOT_DIR="$saved_boot_dir"
+link_line="$(sed -n '1p' <<< "$spaced_block")"
+link_args="$(bash -c 'ln() { printf "<%s>\\n" "$@"; }; eval "$1"' _ "$link_line")"
+[ "$link_args" = "$(printf '<-sf>\n<%s>\n<%s>\n</usr/local/bin/>' "$spaced_self" "$spaced_shim")" ] \
+  || fail "boot link paths were split by the shell"
+key_line="$(sed -n '3p' <<< "$spaced_block")"
+key_args="$(bash -c 'cp() { printf "<%s>\\n" "$@"; }; chmod() { :; }; eval "$1"' _ "$key_line")"
+[ "$key_args" = "$(printf '<%s>\n</root/.ssh/>' "$tmp/boot with spaces/ssh/root/id_ed25519*")" ] \
+  || fail "boot key path was split by the shell"
 
 # Rewriting is idempotent: exactly one block, no stacking on repeated runs.
 write_unraid_boot_block "$go"
@@ -192,6 +213,16 @@ sync_dir_for_drift="$SATCHEL_DIR/sync"
 mkdir -p "$sync_dir_for_drift/machines/tower"
 SYNC_URL=x; git init -q "$sync_dir_for_drift" 2>/dev/null || true
 sync_ready || fail "drift fixture is not sync_ready"
+
+# Publishing identical runtime facts must not replace the synced file on every
+# session. Content equality is observable as the same inode surviving.
+printf 'claude 1, codex 2\n' > "$IMAGE_AGENTS_FILE"
+publish_machine_environment
+published_environment="$(machine_environment_file)"
+published_inode="$(stat -c %i "$published_environment")"
+publish_machine_environment
+[ "$(stat -c %i "$published_environment")" = "$published_inode" ] \
+  || fail "unchanged machine environment was replaced"
 
 # The `|| true` must sit OUTSIDE the substitution: die() exits the subshell,
 # so an inner guard never runs. This has been the single most repeated

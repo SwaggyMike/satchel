@@ -242,17 +242,20 @@ session_mount_guard() {
 # first session — commits would then fail with "Author identity unknown"
 # forever. Key off the identity itself, and never clobber an existing config.
 seed_agent_git_identity() { # seed_agent_git_identity <agent-home>
-  local cfg="$1/.gitconfig" name email
-  [ -f "$HOME/.gitconfig" ] || return 0
-  git config --file "$cfg" user.email >/dev/null 2>&1 && return 0
+  local cfg="$1/.gitconfig" host_cfg="$HOME/.gitconfig" value
+  [ -f "$host_cfg" ] || return 0
   if [ ! -f "$cfg" ]; then
-    cp "$HOME/.gitconfig" "$cfg"
+    cp "$host_cfg" "$cfg"
     return 0
   fi
-  name="$(git config --file "$HOME/.gitconfig" user.name 2>/dev/null || true)"
-  email="$(git config --file "$HOME/.gitconfig" user.email 2>/dev/null || true)"
-  if [ -n "$name" ]; then git config --file "$cfg" user.name "$name"; fi
-  if [ -n "$email" ]; then git config --file "$cfg" user.email "$email"; fi
+  if ! git config --file "$cfg" user.name >/dev/null 2>&1; then
+    value="$(git config --file "$host_cfg" user.name 2>/dev/null || true)"
+    [ -z "$value" ] || git config --file "$cfg" user.name "$value"
+  fi
+  if ! git config --file "$cfg" user.email >/dev/null 2>&1; then
+    value="$(git config --file "$host_cfg" user.email 2>/dev/null || true)"
+    [ -z "$value" ] || git config --file "$cfg" user.email "$value"
+  fi
   return 0
 }
 

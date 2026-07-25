@@ -99,7 +99,7 @@ cmd_link() {
 cmd_unlink() {
   local agents=("$@")
   [ "${#agents[@]}" -eq 0 ] && agents=(claude codex)
-  local bin self agent shim
+  local bin self agent shim live
   bin="$(shim_dir)"
   self="$(readlink -f "$0")"
   for agent in "${agents[@]}"; do
@@ -122,9 +122,10 @@ cmd_unlink() {
     # stale one now so an unlinked shim does not come back after a reboot. Only
     # a link back into the shim just removed, and never fatally: an unwritable
     # /usr/local/bin is somebody else's business.
-    if [ -L "/usr/local/bin/$agent" ] \
-       && [ "$(readlink -f "/usr/local/bin/$agent" 2>/dev/null || true)" = "$(readlink -f "$shim" 2>/dev/null || printf '%s' "$shim")" ]; then
-      rm -f "/usr/local/bin/$agent" 2>/dev/null || true
+    live="$UNRAID_LIVE_BIN_DIR/$agent"
+    if [ -L "$live" ] \
+       && [ "$(readlink -f "$live" 2>/dev/null || true)" = "$(readlink -f "$shim" 2>/dev/null || printf '%s' "$shim")" ]; then
+      rm -f "$live" 2>/dev/null || true
     fi
   done
   sync_unraid_boot_block
@@ -185,13 +186,14 @@ BOOT_BLOCK_END='# <<< satchel boot persistence <<<'
 # previously duplicated in install.sh and in the README, and the copies had
 # already drifted apart by one line.
 unraid_boot_block_body() { # unraid_boot_block_body <satchel-path> <shim>...
-  local self="$1"; shift
-  printf 'ln -sf %s' "$self"
-  local s; for s in "$@"; do printf ' %s' "$s"; done
-  printf ' /usr/local/bin/\n'
+  local self="$1" s key_dir; shift
+  printf 'ln -sf %q' "$self"
+  for s in "$@"; do printf ' %q' "$s"; done
+  printf ' %q\n' /usr/local/bin/
   printf 'mkdir -p /root/.ssh && chmod 700 /root/.ssh\n'
-  printf 'cp %s/id_ed25519* /root/.ssh/ 2>/dev/null && chmod 600 /root/.ssh/id_ed25519\n' "$(unraid_key_dir)"
-  printf 'cp %s/known_hosts /root/.ssh/ 2>/dev/null\n' "$(unraid_key_dir)"
+  key_dir="$(unraid_key_dir)"
+  printf 'cp %q/id_ed25519* /root/.ssh/ 2>/dev/null && chmod 600 /root/.ssh/id_ed25519\n' "$key_dir"
+  printf 'cp %q/known_hosts /root/.ssh/ 2>/dev/null\n' "$key_dir"
 }
 
 unraid_owned_shims() { # prints this installation's shim paths, one per line
@@ -265,7 +267,7 @@ write_unraid_boot_block() { # write_unraid_boot_block <go-file>
   } > "$tmp"
   install_go_file "$tmp" "$go" || return 1
   # Make this boot look like the next one will.
-  ln -sf "$self" ${shims[@]+"${shims[@]}"} /usr/local/bin/ 2>/dev/null || true
+  ln -sf "$self" ${shims[@]+"${shims[@]}"} "$UNRAID_LIVE_BIN_DIR/" 2>/dev/null || true
   return 0
 }
 

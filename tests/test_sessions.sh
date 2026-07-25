@@ -165,6 +165,14 @@ refute grep -q 'cannot be fixed from inside' <(ownership_note)
 mkdir -p "$SATCHEL_DIR/sync/machines/..bad"
 refute validate_machine_state
 rmdir "$SATCHEL_DIR/sync/machines/..bad"
+machine_environment="$SATCHEL_DIR/sync/machines/testbox/environment.json"
+printf '{"satchel":"2.0.0","commit":"abc","engine":"docker","agents":"claude 1","future":true}\n' \
+  > "$machine_environment"
+validate_machine_state
+printf '{"satchel":2,"commit":"abc","engine":"docker","agents":"claude 1"}\n' \
+  > "$machine_environment"
+refute validate_machine_state
+rm "$machine_environment"
 # An unknown field is accepted on purpose, so a newer Satchel elsewhere in the
 # caravan cannot brick this machine (tests/test_mcp.sh covers that contract).
 # This assertion used to demand the opposite and never fired, because a leading
@@ -420,6 +428,13 @@ git config --file "$id_home/.gitconfig" --get-all safe.directory | grep -qF "$tm
 git config --file "$id_home/.gitconfig" user.email "kept@example.com"
 seed_agent_git_identity "$id_home"
 [ "$(git config --file "$id_home/.gitconfig" user.email)" = "kept@example.com" ]
+# A partial identity is still unusable for commits. Preserve the value already
+# chosen in the agent home, but fill the missing half from the host.
+partial_home="$tmp/partial-id-home"; mkdir -p "$partial_home"
+git config --file "$partial_home/.gitconfig" user.email "partial@example.com"
+seed_agent_git_identity "$partial_home"
+[ "$(git config --file "$partial_home/.gitconfig" user.email)" = "partial@example.com" ]
+[ "$(git config --file "$partial_home/.gitconfig" user.name)" = "Test User" ]
 # A fresh home with no prior config still gets the whole host config copied.
 fresh_home="$tmp/fresh-home"; mkdir -p "$fresh_home"
 seed_agent_git_identity "$fresh_home"

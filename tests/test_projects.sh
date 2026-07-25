@@ -45,21 +45,21 @@ id="$(enroll_project "$tmp/work/app" sample)"
 [ "$(canonical_remote 'https://token@example.com/Owner/Repo.git?x=secret')" = example.com/Owner/Repo ]
 refute grep -q token "$(repository_registry_file)"
 printf '<!-- satchel-handoff project=sample machine=a date=2026-01-01T00:00:00Z -->\n' \
-  > "$SATCHEL_DIR/sync/projects/sample/handoffs/old.md"
+  > "$SATCHEL_DIR/sync/projects/sample/handoffs/2026-01-01T00-00-00Z--a.md"
 printf '<!-- satchel-handoff project=sample machine=b date=2026-02-01T00:00:00Z -->\n' \
-  > "$SATCHEL_DIR/sync/projects/sample/handoffs/new.md"
-[ "$(basename "$(latest_handoff sample)")" = new.md ]
+  > "$SATCHEL_DIR/sync/projects/sample/handoffs/2026-02-01T00-00-00Z--b.md"
+[ "$(basename "$(latest_handoff sample)")" = 2026-02-01T00-00-00Z--b.md ]
 
 # Empty project id selects the machine scope: untracked and Host Sessions
 # keep their handoffs under machines/<name>/handoffs/.
 [ -z "$(latest_handoff "")" ]
 mkdir -p "$SATCHEL_DIR/sync/machines/testbox/handoffs"
 printf '<!-- satchel-handoff project=- machine=testbox date=2026-01-05T00:00:00Z -->\n' \
-  > "$SATCHEL_DIR/sync/machines/testbox/handoffs/first.md"
+  > "$SATCHEL_DIR/sync/machines/testbox/handoffs/2026-01-05T00-00-00Z.md"
 printf '<!-- satchel-handoff project=- machine=testbox date=2026-02-05T00:00:00Z -->\n' \
-  > "$SATCHEL_DIR/sync/machines/testbox/handoffs/second.md"
-[ "$(basename "$(latest_handoff "")")" = second.md ]
-[ "$(basename "$(latest_handoff sample)")" = new.md ]
+  > "$SATCHEL_DIR/sync/machines/testbox/handoffs/2026-02-05T00-00-00Z.md"
+[ "$(basename "$(latest_handoff "")")" = 2026-02-05T00-00-00Z.md ]
+[ "$(basename "$(latest_handoff sample)")" = 2026-02-01T00-00-00Z--b.md ]
 
 # Machine Notes: mounted into sessions, injected into the preamble, and the
 # standing instruction is present even before any notes exist.
@@ -110,9 +110,12 @@ compose_run_args claude "$tmp/home_c" "$tmp/work/app"
 [[ " ${RUN_ARGS[*]} " == *" $wd:$wd "* ]]
 write_memory_file claude "$tmp/home_c" sample "$tmp/work/app" 2>/dev/null
 grep -q "$wd" "$tmp/home_c/.claude/CLAUDE.md"
-WITH_DIRS=("$HOME");           ! (with_dirs_guard 2>/dev/null)
-WITH_DIRS=("$tmp/no-such-dir"); ! (with_dirs_guard 2>/dev/null)
-WITH_DIRS=(/);                 ! (with_dirs_guard 2>/dev/null)
+WITH_DIRS=("$HOME")
+refute with_dirs_guard
+WITH_DIRS=("$tmp/no-such-dir")
+refute with_dirs_guard
+WITH_DIRS=(/)
+refute with_dirs_guard
 WITH_DIRS=()
 
 # The mount guard still hard-refuses home and / without a tty.
@@ -295,6 +298,7 @@ printf '## Goal\ntruncated header\n' > "$newest_untagged"
 prune_handoffs "$retained_dir" >/dev/null
 [ -f "$newest_untagged" ]
 [ "$(find "$retained_dir" -type f -name '*.md' | wc -l)" = "$HANDOFF_RETENTION" ]
+[ "$(latest_handoff retained)" = "$newest_untagged" ]
 
 # Global untracking ignores a portable origin, clears every machine's path
 # cache, and removes the active Project and handoffs.
@@ -419,13 +423,28 @@ trap - INT
 # debugging after the wrong one.
 saved_handoff="$(latest_handoff sample)"
 saved_hash="$(git hash-object "$saved_handoff")"
+HANDOFF_ENGINE_EVENTS="$HANDOFF_SIGNAL_DIR/engine-events"
+HANDOFF_COLLISION_LABEL=""
 mock_engine() {
-  printf '## Goal\nPartial despite failure\n## Done\nDone\n## In flight\nNone\n## Next steps\nContinue\n## Gotchas\nNone\n'
-  return 1
+  case "$1" in
+    run)
+      printf '## Goal\nPartial despite failure\n## Done\nDone\n## In flight\nNone\n## Next steps\nContinue\n## Gotchas\nNone\n'
+      return 1
+      ;;
+    inspect) printf '%s' "$HANDOFF_COLLISION_LABEL" ;;
+    rm) printf 'remove\n' >> "$HANDOFF_ENGINE_EVENTS" ;;
+  esac
 }
+: > "$HANDOFF_ENGINE_EVENTS"
 generate_handoff claude sample "$tmp/work/app" >/dev/null 2>"$HANDOFF_SIGNAL_DIR/fail-rc"
 [ "$(git hash-object "$saved_handoff")" = "$saved_hash" ]
 grep -Fq 'handoff writer exited 1' "$HANDOFF_SIGNAL_DIR/fail-rc"
+# A failed `run --name` can mean somebody else already owns that name. Cleanup
+# must not force-remove it unless the engine confirms Satchel's managed label.
+refute grep -q '^remove$' "$HANDOFF_ENGINE_EVENTS"
+HANDOFF_COLLISION_LABEL=true
+generate_handoff claude sample "$tmp/work/app" >/dev/null 2>/dev/null
+grep -q '^remove$' "$HANDOFF_ENGINE_EVENTS"
 mock_engine() { printf '## Goal\nIncomplete\n'; }
 generate_handoff claude sample "$tmp/work/app" >/dev/null 2>"$HANDOFF_SIGNAL_DIR/fail-format"
 [ "$(git hash-object "$saved_handoff")" = "$saved_hash" ]

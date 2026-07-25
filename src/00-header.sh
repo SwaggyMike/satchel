@@ -33,6 +33,9 @@ IMAGE_AGENTS_FILE="$SATCHEL_DIR/image-agents"
 # hardcoded path reads were why none of this had any test coverage.
 UNRAID_MARKER="${SATCHEL_UNRAID_MARKER:-/etc/unraid-version}"
 UNRAID_BOOT_DIR="${SATCHEL_UNRAID_BOOT_DIR:-/boot/config}"
+# The live link directory is fixed on Unraid, but overridable so platform tests
+# never write into the runner's real /usr/local/bin (especially when run as root).
+UNRAID_LIVE_BIN_DIR="${SATCHEL_UNRAID_LIVE_BIN_DIR:-/usr/local/bin}"
 IMAGE="localhost/satchel:latest"
 MANAGED_CONTAINER_LABEL="io.github.swaggymike.satchel.managed=true"
 

@@ -18,7 +18,7 @@ portable Git origins do.
   HTTPS spellings of the same forge repository normalize to one identity.
 - `projects/<id>/project.json` records stable Project identity.
   `projects/<id>/handoffs/` contains timestamped handoffs, bounded to the
-  latest ten active files by ADR 0008.
+  active-file limit defined by ADR 0008.
 - `machines/<machine>/projects.json` is a cache mapping absolute checkout
   paths to Projects. Satchel recursively discovers repositories inside the
   launch directory and `--with` roots, before and after a session, and rebuilds

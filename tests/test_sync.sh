@@ -77,12 +77,17 @@ grep -q '^local cache$' "$SYNC_DIR/local-dirty"
 # then die parsing conflict markers, and the session would refuse to start.
 rm "$SYNC_DIR/local-dirty"
 printf 'base\n' > "$SYNC_DIR/conflict"
-git_sync add conflict
+printf 'committed cache\n' > "$SYNC_DIR/dirty-through-conflict"
+git_sync add conflict dirty-through-conflict
 git_sync commit -q -m "conflict base"
 git_sync push -q
 git -C "$other" pull -q --rebase
 printf 'local\n' > "$SYNC_DIR/conflict"
 git_sync commit -qam "local conflict"
+# A previous interrupted session can also have left a tracked edit outside the
+# commits that conflict. pull --autostash restores it when the rebase is
+# aborted; recovery must not erase it afterward just to make Git look clean.
+printf 'uncommitted cache\n' > "$SYNC_DIR/dirty-through-conflict"
 printf 'remote\n' > "$other/conflict"
 git -C "$other" -c user.name=o -c user.email=o@o commit -qam "remote conflict"
 git -C "$other" push -q
@@ -94,6 +99,8 @@ refute sync_needs_recovery                            # and the clone is clean a
 grep -q 'backed out rather than guess' <<< "$pull_output"
 grep -q '^local$' "$SYNC_DIR/conflict"           # local work survives
 [ "$(git_sync log -1 --format=%s)" = "local conflict" ]
+grep -q '^uncommitted cache$' "$SYNC_DIR/dirty-through-conflict"
+[ -n "$(git_sync status --porcelain -- dirty-through-conflict)" ]
 git_sync reset -q --hard origin/main
 
 # The recovery guard used to sit behind has_upstream. An interrupted rebase

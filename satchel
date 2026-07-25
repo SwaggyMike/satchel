@@ -33,6 +33,9 @@ IMAGE_AGENTS_FILE="$SATCHEL_DIR/image-agents"
 # hardcoded path reads were why none of this had any test coverage.
 UNRAID_MARKER="${SATCHEL_UNRAID_MARKER:-/etc/unraid-version}"
 UNRAID_BOOT_DIR="${SATCHEL_UNRAID_BOOT_DIR:-/boot/config}"
+# The live link directory is fixed on Unraid, but overridable so platform tests
+# never write into the runner's real /usr/local/bin (especially when run as root).
+UNRAID_LIVE_BIN_DIR="${SATCHEL_UNRAID_LIVE_BIN_DIR:-/usr/local/bin}"
 IMAGE="localhost/satchel:latest"
 MANAGED_CONTAINER_LABEL="io.github.swaggymike.satchel.managed=true"
 
@@ -232,7 +235,7 @@ cmd_link() {
 cmd_unlink() {
   local agents=("$@")
   [ "${#agents[@]}" -eq 0 ] && agents=(claude codex)
-  local bin self agent shim
+  local bin self agent shim live
   bin="$(shim_dir)"
   self="$(readlink -f "$0")"
   for agent in "${agents[@]}"; do
@@ -255,9 +258,10 @@ cmd_unlink() {
     # stale one now so an unlinked shim does not come back after a reboot. Only
     # a link back into the shim just removed, and never fatally: an unwritable
     # /usr/local/bin is somebody else's business.
-    if [ -L "/usr/local/bin/$agent" ] \
-       && [ "$(readlink -f "/usr/local/bin/$agent" 2>/dev/null || true)" = "$(readlink -f "$shim" 2>/dev/null || printf '%s' "$shim")" ]; then
-      rm -f "/usr/local/bin/$agent" 2>/dev/null || true
+    live="$UNRAID_LIVE_BIN_DIR/$agent"
+    if [ -L "$live" ] \
+       && [ "$(readlink -f "$live" 2>/dev/null || true)" = "$(readlink -f "$shim" 2>/dev/null || printf '%s' "$shim")" ]; then
+      rm -f "$live" 2>/dev/null || true
     fi
   done
   sync_unraid_boot_block
@@ -318,13 +322,14 @@ BOOT_BLOCK_END='# <<< satchel boot persistence <<<'
 # previously duplicated in install.sh and in the README, and the copies had
 # already drifted apart by one line.
 unraid_boot_block_body() { # unraid_boot_block_body <satchel-path> <shim>...
-  local self="$1"; shift
-  printf 'ln -sf %s' "$self"
-  local s; for s in "$@"; do printf ' %s' "$s"; done
-  printf ' /usr/local/bin/\n'
+  local self="$1" s key_dir; shift
+  printf 'ln -sf %q' "$self"
+  for s in "$@"; do printf ' %q' "$s"; done
+  printf ' %q\n' /usr/local/bin/
   printf 'mkdir -p /root/.ssh && chmod 700 /root/.ssh\n'
-  printf 'cp %s/id_ed25519* /root/.ssh/ 2>/dev/null && chmod 600 /root/.ssh/id_ed25519\n' "$(unraid_key_dir)"
-  printf 'cp %s/known_hosts /root/.ssh/ 2>/dev/null\n' "$(unraid_key_dir)"
+  key_dir="$(unraid_key_dir)"
+  printf 'cp %q/id_ed25519* /root/.ssh/ 2>/dev/null && chmod 600 /root/.ssh/id_ed25519\n' "$key_dir"
+  printf 'cp %q/known_hosts /root/.ssh/ 2>/dev/null\n' "$key_dir"
 }
 
 unraid_owned_shims() { # prints this installation's shim paths, one per line
@@ -398,7 +403,7 @@ write_unraid_boot_block() { # write_unraid_boot_block <go-file>
   } > "$tmp"
   install_go_file "$tmp" "$go" || return 1
   # Make this boot look like the next one will.
-  ln -sf "$self" ${shims[@]+"${shims[@]}"} /usr/local/bin/ 2>/dev/null || true
+  ln -sf "$self" ${shims[@]+"${shims[@]}"} "$UNRAID_LIVE_BIN_DIR/" 2>/dev/null || true
   return 0
 }
 
@@ -1651,13 +1656,15 @@ HANDOFF_MARK='<!-- satchel-handoff'
 # machine instead of per project: machines/<name>/handoffs/. An empty
 # project id selects that machine scope.
 latest_handoff() { # latest_handoff <project-id> → prints newest handoff
-  local slug="$1" dir best="" best_date="" f date
+  local slug="$1" dir best="" f
   if [ -n "$slug" ]; then dir="$SYNC_DIR/projects/$slug/handoffs"
   else dir="$SYNC_DIR/machines/$MACHINE/handoffs"; fi
+  # file_handoff derives sortable filenames from the same UTC timestamp written
+  # into the header. Treat the filename as the durable ordering key everywhere:
+  # a truncated header must not make a retained newer handoff invisible.
   for f in "$dir"/*.md; do
     [ -f "$f" ] || continue
-    date="$(sed -n "1s/.*date=\([^ ]*\).*/\1/p" "$f")"
-    if [ -z "$best" ] || [[ "$date" > "$best_date" ]]; then best="$f"; best_date="$date"; fi
+    best="$f"
   done
   [ -n "$best" ] && printf '%s' "$best"
   return 0
@@ -2304,6 +2311,16 @@ HANDOFF_CONTAINER_NAME=""
 
 remove_handoff_container() {
   [ -n "$HANDOFF_CONTAINER_NAME" ] || return 0
+  local label_key label_value actual=""
+  label_key="${MANAGED_CONTAINER_LABEL%%=*}"
+  label_value="${MANAGED_CONTAINER_LABEL#*=}"
+  actual="$("$(engine)" inspect \
+    --format "{{ index .Config.Labels \"$label_key\" }}" \
+    "$HANDOFF_CONTAINER_NAME" 2>/dev/null || true)"
+  # `run --name` can fail because an unrelated container already owns the
+  # predictable name. Never turn cleanup into deletion of something Satchel
+  # cannot prove it created.
+  [ "$actual" = "$label_value" ] || return 0
   "$(engine)" rm -f "$HANDOFF_CONTAINER_NAME" >/dev/null 2>&1 || true
   return 0
 }
@@ -2613,7 +2630,11 @@ recover_sync_repo() {
     || git_sync merge --abort >/dev/null 2>&1 \
     || git_sync cherry-pick --abort >/dev/null 2>&1 \
     || git_sync revert --abort >/dev/null 2>&1 || true
-  git_sync reset -q --hard >/dev/null 2>&1 || true
+  # A rebase started with --autostash restores pre-existing tracked edits when
+  # aborted. Do not reset afterward merely to make the tree look clean: those
+  # edits can be the only surviving copy of work from an interrupted session.
+  # If aborting did not clear the operation or its unmerged entries, the check
+  # below fails and the caller degrades syncing instead of deleting anything.
   sync_needs_recovery && return 1
   return 0
 }
@@ -2723,13 +2744,26 @@ baseline_skip_file()      { printf '%s/.baseline-skip' "$(machine_dir)"; }
 validate_machine_state() {
   valid_machine_name "$MACHINE" || die "unsafe machine name '$MACHINE'"
   [ -d "$SYNC_DIR/machines" ] || return 0
-  local entry name
+  local entry name environment
   while IFS= read -r -d '' entry; do
     [ -d "$entry" ] && [ ! -L "$entry" ] \
       || die "invalid machine entry: $entry"
     name="$(basename "$entry")"
     valid_machine_name "$name" \
       || die "unsafe machine directory '$name' in the Sync Repo"
+    environment="$entry/environment.json"
+    if [ -e "$environment" ] || [ -L "$environment" ]; then
+      [ -f "$environment" ] && [ ! -L "$environment" ] \
+        || die "invalid environment report for machine '$name'"
+      jq -e '
+        type == "object"
+        and (.satchel | type == "string") and (.satchel | length > 0)
+        and (.commit | type == "string")
+        and (.engine | type == "string")
+        and (.agents | type == "string")
+      ' "$environment" >/dev/null 2>&1 \
+        || die "invalid environment report for machine '$name'"
+    fi
   done < <(find -P "$SYNC_DIR/machines" -mindepth 1 -maxdepth 1 -print0)
 }
 
@@ -2746,11 +2780,17 @@ publish_machine_environment() {
   dir="$(machine_dir)"; mkdir -p "$dir"
   f="$(machine_environment_file)"
   [ ! -f "$SCRIPT_SHA_FILE" ] || commit="$(tr -cd 'a-f0-9' < "$SCRIPT_SHA_FILE" | cut -c1-7)"
-  jq -n --arg v "$SATCHEL_VERSION" --arg c "$commit" \
-        --arg e "${ENGINE:-}" --arg a "$(cached_image_agents)" \
-    '{satchel: $v, commit: $c, engine: $e, agents: $a}' > "$f.tmp" \
-    && mv -f "$f.tmp" "$f"
-  rm -f "$f.tmp"
+  if ! jq -n --arg v "$SATCHEL_VERSION" --arg c "$commit" \
+          --arg e "${ENGINE:-}" --arg a "$(cached_image_agents)" \
+      '{satchel: $v, commit: $c, engine: $e, agents: $a}' > "$f.tmp"; then
+    rm -f "$f.tmp"
+    return 1
+  fi
+  if [ -f "$f" ] && cmp -s "$f.tmp" "$f"; then
+    rm -f "$f.tmp"
+    return 0
+  fi
+  mv -f "$f.tmp" "$f"
   return 0
 }
 
@@ -3244,17 +3284,20 @@ session_mount_guard() {
 # first session — commits would then fail with "Author identity unknown"
 # forever. Key off the identity itself, and never clobber an existing config.
 seed_agent_git_identity() { # seed_agent_git_identity <agent-home>
-  local cfg="$1/.gitconfig" name email
-  [ -f "$HOME/.gitconfig" ] || return 0
-  git config --file "$cfg" user.email >/dev/null 2>&1 && return 0
+  local cfg="$1/.gitconfig" host_cfg="$HOME/.gitconfig" value
+  [ -f "$host_cfg" ] || return 0
   if [ ! -f "$cfg" ]; then
-    cp "$HOME/.gitconfig" "$cfg"
+    cp "$host_cfg" "$cfg"
     return 0
   fi
-  name="$(git config --file "$HOME/.gitconfig" user.name 2>/dev/null || true)"
-  email="$(git config --file "$HOME/.gitconfig" user.email 2>/dev/null || true)"
-  if [ -n "$name" ]; then git config --file "$cfg" user.name "$name"; fi
-  if [ -n "$email" ]; then git config --file "$cfg" user.email "$email"; fi
+  if ! git config --file "$cfg" user.name >/dev/null 2>&1; then
+    value="$(git config --file "$host_cfg" user.name 2>/dev/null || true)"
+    [ -z "$value" ] || git config --file "$cfg" user.name "$value"
+  fi
+  if ! git config --file "$cfg" user.email >/dev/null 2>&1; then
+    value="$(git config --file "$host_cfg" user.email 2>/dev/null || true)"
+    [ -z "$value" ] || git config --file "$cfg" user.email "$value"
+  fi
   return 0
 }
 
@@ -4198,8 +4241,11 @@ cmd_update() {
   # the file between top-level commands — then resumes at the old offset inside
   # the new, longer file and executes a fragment of it. That is the normal
   # layout on Unraid, where /tmp is tmpfs and Satchel lives on the array.
-  tmp="$(mktemp "$(dirname "$self")/.satchel-update.XXXXXX")" \
-    || tmp="$(mktemp)"
+  tmp="$(mktemp "$(dirname "$self")/.satchel-update.XXXXXX" 2>/dev/null)" || {
+    warn "could not stage the update beside $self — leaving the running script untouched"
+    warn "make that directory writable by this user, then run 'satchel update' again"
+    return 1
+  }
   trap 'rm -f -- "$tmp"' EXIT
   curl -fsSL "https://raw.githubusercontent.com/$SATCHEL_REPO/$ref/satchel" -o "$tmp" || die "download failed"
   bash -n "$tmp" || die "downloaded script does not parse — not installing it"

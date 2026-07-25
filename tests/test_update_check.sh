@@ -91,6 +91,24 @@ need_cmd() { :; }
 print_update_log() { :; }
 build_image() { : > "$old_recipe_hit"; }
 image_agent_versions() { :; }
+
+# Replacing the running script is safe only when the download is staged beside
+# it. If that directory is not writable, falling back to /tmp can turn mv into
+# a cross-filesystem copy over the inode Bash is still executing. Refuse the
+# update and leave the installed artifact intact.
+mktemp_bin="$(command -v mktemp)"
+mktemp() {
+  case "${1:-}" in
+    */.satchel-update.*) return 1 ;;
+    *) "$mktemp_bin" "$@" ;;
+  esac
+}
+before_update="$(cat "$fake_self")"
+refute cmd_update
+[ "$(cat "$fake_self")" = "$before_update" ]
+[ ! -e "$NEW_RECIPE_HIT" ]
+unset -f mktemp
+
 cmd_update >/dev/null 2>&1
 [ -f "$NEW_RECIPE_HIT" ]
 [ ! -e "$old_recipe_hit" ]

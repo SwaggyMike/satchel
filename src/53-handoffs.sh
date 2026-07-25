@@ -166,6 +166,16 @@ HANDOFF_CONTAINER_NAME=""
 
 remove_handoff_container() {
   [ -n "$HANDOFF_CONTAINER_NAME" ] || return 0
+  local label_key label_value actual=""
+  label_key="${MANAGED_CONTAINER_LABEL%%=*}"
+  label_value="${MANAGED_CONTAINER_LABEL#*=}"
+  actual="$("$(engine)" inspect \
+    --format "{{ index .Config.Labels \"$label_key\" }}" \
+    "$HANDOFF_CONTAINER_NAME" 2>/dev/null || true)"
+  # `run --name` can fail because an unrelated container already owns the
+  # predictable name. Never turn cleanup into deletion of something Satchel
+  # cannot prove it created.
+  [ "$actual" = "$label_value" ] || return 0
   "$(engine)" rm -f "$HANDOFF_CONTAINER_NAME" >/dev/null 2>&1 || true
   return 0
 }
