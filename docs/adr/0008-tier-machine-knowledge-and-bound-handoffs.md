@@ -30,6 +30,11 @@ became harder to find as startup context grew.
 - Handoff directories retain the latest ten files per project or machine.
   Older handoffs remain recoverable from Git history; the active tree is not
   an incident archive.
+- The handoff writer always runs the agent's own default model at low
+  reasoning effort. A configurable smaller model was tried and removed: a
+  model that answers correctly on its own can still fail or drift out of the
+  required format when resuming a long session transcript, and the fallback
+  run cost more wall-clock than the smaller model saved.
 - The unattended handoff writer receives only the persistent agent home needed
   to resume the conversation. An empty tmpfs at the original cwd lets both
   engines satisfy cwd-based conversation lookup without mounting the project.

@@ -387,7 +387,6 @@ mock_engine() {
   bash -c 'trap -p QUIT' > "$HANDOFF_SIGNAL_DIR/quit"
   printf '## Goal\nVerify handoff signal handling\n## Done\nDone\n## In flight\nNone\n## Next steps\nContinue\n## Gotchas\nNone\n'
 }
-SATCHEL_HANDOFF_MODEL_CLAUDE=""
 trap '' INT
 generate_handoff claude sample "$tmp/work/app" 2> "$HANDOFF_SIGNAL_DIR/stderr"
 grep -Eq "trap -- '' (SIGINT|INT)" "$HANDOFF_SIGNAL_DIR/int"
@@ -398,17 +397,24 @@ trap - INT
 
 # Failed or incomplete writers preserve the previous valid handoff even when
 # their stdout looks partially usable.
+#
+# The two faults also have to be told apart out loud: a writer that died and a
+# writer that rambled used to print the same "model failed" line, which sent
+# debugging after the wrong one.
 saved_handoff="$(latest_handoff sample)"
 saved_hash="$(git hash-object "$saved_handoff")"
 mock_engine() {
   printf '## Goal\nPartial despite failure\n## Done\nDone\n## In flight\nNone\n## Next steps\nContinue\n## Gotchas\nNone\n'
   return 1
 }
-generate_handoff claude sample "$tmp/work/app" >/dev/null 2>&1
+generate_handoff claude sample "$tmp/work/app" >/dev/null 2>"$HANDOFF_SIGNAL_DIR/fail-rc"
 [ "$(git hash-object "$saved_handoff")" = "$saved_hash" ]
+grep -Fq 'handoff writer exited 1' "$HANDOFF_SIGNAL_DIR/fail-rc"
 mock_engine() { printf '## Goal\nIncomplete\n'; }
-generate_handoff claude sample "$tmp/work/app" >/dev/null 2>&1
+generate_handoff claude sample "$tmp/work/app" >/dev/null 2>"$HANDOFF_SIGNAL_DIR/fail-format"
 [ "$(git hash-object "$saved_handoff")" = "$saved_hash" ]
+grep -Fq 'handoff was not in the expected format' "$HANDOFF_SIGNAL_DIR/fail-format"
+refute grep -Fq 'exited' "$HANDOFF_SIGNAL_DIR/fail-format"
 
 # Holding Ctrl-C to quit the agent keeps delivering INT to the whole foreground
 # process group well after the agent is gone. Cleanup must survive all of it.

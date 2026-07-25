@@ -514,8 +514,6 @@ cmd_uninstall() {
 # 'pref' settings sync caravan-wide via settings.env in the Sync Repo; 'machine'
 # settings describe this box and stay in the local config.
 SETTINGS_SPEC=(
-  "SATCHEL_HANDOFF_MODEL_CLAUDE|pref|haiku|model that writes handoffs: haiku, sonnet, opus, fable, or a full model name; '' = the agent's default"
-  "SATCHEL_HANDOFF_MODEL_CODEX|pref||same for codex; '' = the agent's default"
   "SATCHEL_ENGINE|machine||force docker or podman (default: auto-detect)"
   "SATCHEL_SSH|machine|1|forward the host's ssh-agent into sessions so git push works (0 = off)"
   "SATCHEL_CLIPBOARD|machine|1|forward the desktop clipboard socket so pasting images works (0 = off)"

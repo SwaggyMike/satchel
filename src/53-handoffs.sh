@@ -280,26 +280,19 @@ Start tracked notes with exactly '=== project: <id> ===', candidate notes with e
     scope=machine; [ -n "$slug" ] && scope=project
     prompt="The session is ending. Based on this conversation, write a handoff note so the next session on this $scope can continue where we left off. Use exactly these sections: ## Goal, ## Done, ## In flight, ## Next steps, ## Gotchas. Under 30 lines total. If you did no meaningful work to hand off, output exactly NO_HANDOFF and nothing else. Output only the markdown, no preamble."
   fi
-  # A handoff is a summary chore in a fixed format — the small fast model is
-  # plenty and halves the wait at session end. Override per agent via
-  # 'satchel settings'; empty means the agent's own default model.
-  local base_cmd model setting
+  # A handoff is a summary chore in a fixed format, so the speed lever is low
+  # reasoning effort on whatever model the agent already defaults to. Pinning a
+  # smaller model here was tried and removed: an alias that answers fine on its
+  # own can still fail or drift out of format when resuming a long session
+  # transcript, and the fallback run cost more time than the small model saved.
+  local cmd
   case "$agent" in
     claude)
-      base_cmd=(claude --continue --strict-mcp-config --tools "" --effort low -p "$prompt")
-      model="${SATCHEL_HANDOFF_MODEL_CLAUDE-haiku}"; setting=SATCHEL_HANDOFF_MODEL_CLAUDE ;;
+      cmd=(claude --continue --strict-mcp-config --tools "" --effort low -p "$prompt") ;;
     codex)
       # --skip-git-repo-check: codex exec hard-fails in a non-git project dir
       # (interactive codex remembers trust; exec does not).
-      # Codex has no rolling cheap-model alias (any pinned name would rot),
-      # so the speed lever is reasoning effort on the default model instead.
-      base_cmd=(codex exec resume --last --skip-git-repo-check --ignore-user-config --ignore-rules -c 'sandbox_mode="danger-full-access"' -c 'model_reasoning_effort="low"' "$prompt")
-      model="${SATCHEL_HANDOFF_MODEL_CODEX-}"; setting=SATCHEL_HANDOFF_MODEL_CODEX ;;
-  esac
-  local cmd=("${base_cmd[@]}")
-  case "$agent:$model" in
-    claude:?*) cmd=(claude --continue --strict-mcp-config --tools "" --model "$model" --effort low -p "$prompt") ;;
-    codex:?*)  cmd=(codex exec resume --last --skip-git-repo-check --ignore-user-config --ignore-rules -c 'sandbox_mode="danger-full-access"' -c 'model_reasoning_effort="low"' -m "$model" "$prompt") ;;
+      cmd=(codex exec resume --last --skip-git-repo-check --ignore-user-config --ignore-rules -c 'sandbox_mode="danger-full-access"' -c 'model_reasoning_effort="low"' "$prompt") ;;
   esac
 
   compose_handoff_run_args "$agent" "$HOMES_DIR/$agent" "$project"
@@ -332,35 +325,20 @@ Start tracked notes with exactly '=== project: <id> ===', candidate notes with e
     info "no work to hand off — previous handoff kept"
     return 0
   fi
+  # Two different faults land here: the writer exited nonzero, or it returned
+  # prose that is missing one of the five required headings. Say which, so a
+  # broken container is never mistaken for a model that rambled.
   if [ "$rc" -ne 0 ] || ! handoff_body_complete "$body"; then
-    # Fatfingered model safeguard: a bad SATCHEL_HANDOFF_MODEL_* must not stop
-    # handoffs — retry once on the agent's own default and say who to blame.
-    if [ -n "$model" ]; then
-      warn "handoff model '$model' failed — retrying with the agent's default (fix with: satchel settings $setting <model>)"
-      rc=0
-      run_isolated_task cancellable "$bodyf" "$errf" \
-        timeout 240 "$(engine)" run --rm "${RUN_ARGS[@]}" "$IMAGE" "${base_cmd[@]}" || rc=$?
-      [ "$rc" -eq 0 ] || remove_handoff_container
-      body="$(<"$bodyf")"
-      if [ "$rc" -eq 131 ]; then
-        rm -f "$errf" "$bodyf"
-        warn "handoff skipped — previous handoff kept"
-        return 0
-      fi
-    fi
-    if [ "$rc" -eq 0 ] && [ "$body" = NO_HANDOFF ]; then
-      rm -f "$errf" "$bodyf"
-      info "no work to hand off — previous handoff kept"
-      return 0
-    fi
-    if [ "$rc" -ne 0 ] || ! handoff_body_complete "$body"; then
-      warn "handoff generation failed — keeping the previous handoff"
+    if [ "$rc" -ne 0 ]; then
+      warn "handoff writer exited $rc — keeping the previous handoff"
       if [ -s "$errf" ]; then
         warn "the agent said: $(tail -n 1 "$errf")"
       fi
-      rm -f "$errf" "$bodyf"
-      return 0
+    else
+      warn "handoff was not in the expected format — keeping the previous handoff"
     fi
+    rm -f "$errf" "$bodyf"
+    return 0
   fi
   rm -f "$errf" "$bodyf"
   if [ "$multi" -eq 1 ]; then
