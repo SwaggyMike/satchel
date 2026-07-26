@@ -1,1886 +1,1620 @@
-# Satchel — Rewrite Requirements Specification
+# Rewrite Specification
 
-Aggregated from two independent readings of the current implementation. Where the
-two disagreed, the source was consulted and the verified statement kept.
+This document specifies a program to be built from scratch. It describes the
+problem, not the existing solution. Nothing here should be read as a
+recommendation about structure, language, or decomposition.
 
-This document describes what Satchel does and what a replacement must keep doing.
-It records observable behavior and external contracts, not implementation.
-Anywhere behavior is unclear, contradictory, or looks accidental, it is flagged as
-an **Open question** rather than resolved by guessing.
-
----
-
-## 1. What the program does
-
-### 1.1 Purpose
-
-Satchel is a single-user command-line tool for Linux. It runs AI coding agent
-CLIs — Claude Code and Codex — inside disposable containers scoped to one
-directory, and carries a small amount of state between the user's machines
-through a private Git repository the user owns and hosts themselves.
-
-There is no daemon, no database, no service, and no HTTP API of its own.
-Everything is plain files, Git, and a container engine. The user's collection of
-machines is called a *caravan*.
-
-### 1.2 Installation shapes
-
-Two supported layouts:
-
-- **Conventional** — the command on the host `PATH`, state under the user's home.
-- **Self-contained** — command, redirect shims, and state all beside one another
-  in a user-chosen persistent directory. This exists for systems whose root
-  filesystem is rebuilt at boot.
-
-Initial setup names the machine, optionally connects a private Git repository,
-creates or adopts the initial synchronized state, registers the machine, and
-ensures the shared container image exists.
-
-Setup can complete without a Sync Repo. Sessions still launch, but every
-synchronized capability is unavailable — see §6.1, where the current messaging
-about this is contradictory.
-
-A plain local path may be used as the Sync Repo remote. If it is absent or empty,
-interactive setup offers to create a bare repository there.
-
-Satchel can generate an unencrypted Ed25519 key and print every public key in the
-host user's SSH directory. Authorizing a key at the Git host is always manual; it
-never talks to a forge API.
-
-### 1.3 Command surface
-
-Global options, accepted before the command **or** anywhere among the agent's own
-arguments:
-
-- `--host` — Host Session (sandbox deliberately off)
-- `--unsafe-home` — permit a sandboxed session in `$HOME` or above
-- `--with <dir>` — mount an additional directory (repeatable)
-
-The environment variable `SATCHEL_HOST`, set to any non-empty value, also enables
-Host Session mode.
-
-| Command | Observable behavior |
-| --- | --- |
-| `satchel claude [args]` | Run Claude Code in a container scoped to `$PWD`; remaining args pass to the agent |
-| `satchel codex [args]` | Same for Codex |
-| `satchel init` | Interactively name this machine and connect the Sync Repo |
-| `satchel sync` | Commit, pull, push the Sync Repo; report conflicts |
-| `satchel status [--ignored]` | Report engine, image, shims, sync state, caravan, Projects, MCP, skills |
-| `satchel doctor` | Run end-to-end health checks; non-zero exit on any hard failure |
-| `satchel track [id]` | Explicitly enroll the enclosing Git repository as a Project |
-| `satchel untrack [id]` | Globally ignore a Project and delete its active handoffs |
-| `satchel skills [list]` | List user-installed skills |
-| `satchel skills remove [name]` | Remove a skill everywhere; numbered picker when unnamed |
-| `satchel mcp [list\|add\|remove]` | Manage the MCP registry; bare `add`/`remove` are interactive |
-| `satchel settings` | Print all settings, values, and sources |
-| `satchel settings <KEY> <value> [--local]` | Change a setting |
-| `satchel key [--persist]` | Print public keys, generating one if absent |
-| `satchel retire [machine]` | Remove a machine's folder from the Sync Repo |
-| `satchel import claude\|codex` | Copy the host user's agent login into Satchel's agent home |
-| `satchel image [--rebuild]` | Build the shared image if missing, or force a rebuild |
-| `satchel update` | Self-update from upstream and rebuild the image |
-| `satchel link [claude\|codex]` | Install redirect shims |
-| `satchel unlink [claude\|codex]` | Remove them |
-| `satchel uninstall [--purge] [--yes]` | Remove program, shims, image; optionally purge state |
-| `satchel version` / `--version` | Print the version |
-| `satchel help` / `--help` / `-h` | Print usage |
-
-No command behaves as `help`. Unknown commands and unsupported command-specific
-options exit non-zero.
-
-### 1.4 Redirect shims
-
-Two thin wrappers, `claude` and `codex`, may be installed on the user's `PATH`.
-Each execs Satchel with the corresponding agent name, so typing `claude` in a
-project directory starts a sandboxed session there.
-
-Satchel recognizes a shim as its own only by exact content, and refuses to
-overwrite or delete anything it cannot prove it created.
-
-### 1.5 A session, observably
-
-1. Refuses outright if the working directory is `$HOME`, an ancestor of `$HOME`,
-   `/`, or Satchel's own private state directory — offering a Host Session
-   instead when a terminal is attached.
-2. Validates and normalizes any extra mount directories under the same rules.
-3. Selects a container engine, builds the shared image if absent, and verifies the
-   engine can actually bind-mount Satchel's local files.
-4. Determines whether an SSH agent will be reachable **by the container's UID**,
-   loading a standard host key or starting a temporary agent as needed, and
-   pausing for acknowledgement if `git push` over SSH will not work.
-5. Pulls the Sync Repo (best-effort, bounded, never blocking).
-6. Validates synchronized state; on any problem, disables syncing for the run and
-   continues.
-7. Repairs the shared skill library, quarantining malformed entries.
-8. Prunes handoff directories to their retention bound.
-9. At most once per day, checks whether a newer version exists upstream.
-10. Discovers Git repositories inside the mount roots and maps them to Projects.
-11. On an agent's first normal launch after it authenticates, offers a one-time
-    Machine Baseline. Accepting **consumes the launch** and returns to the shell.
-12. Seeds a Git identity into the agent home from the host's, never overwriting an
-    existing value.
-13. Materializes the MCP registry into the agent's native configuration.
-14. Writes the generated instruction file into the agent home.
-15. Declares the mounted roots trusted for Git and warns, with an exact `chown`,
-    if the session's UID will not be able to write them.
-16. Runs the agent interactively.
-17. Repairs ownership of Satchel's own writable state.
-18. If new transcripts appeared, re-discovers repositories and runs the unattended
-    handoff writer, then files the resulting notes.
-19. Re-validates skills, publishes this machine's runtime versions, commits and
-    best-effort pushes.
-
-The interactive agent's exit status is returned after all of that.
-
-Nothing in steps 5–8 or 17–19 may prevent step 16 — with one currently-broken
-exception recorded in §6.2.
-
-### 1.6 Session safety boundary
-
-A normal session runs with no Linux capabilities, `no-new-privileges`, and a
-configurable non-root UID/GID. A root-run host defaults to `1000:1000`; a non-root
-host defaults to the invoking user's IDs.
-
-It is a boundary for **filesystem visibility and privilege**, not for network or
-user identity: it has ordinary networking, may use the forwarded SSH identity, and
-may read and write the live desktop clipboard.
-
-A Host Session is deliberately not a security boundary at all: root, privileged,
-host PID and network namespaces, host root filesystem read-write at `/host`. It
-prints an explicit pre-launch warning. Normal sessions print no routine banner.
-
-### 1.7 Projects
-
-A Project is an explicitly tracked Git repository. Ordinary directories can never
-become Projects.
-
-Identity is the portable, credential-free normalized Git origin, global across
-machines. Multiple checkouts of one origin share one Project; different origins
-must never share a Project ID.
-
-Discovery recurses only within the declared mount roots, before and after the
-session, so repositories cloned mid-session are still recognized. It does not
-follow symlinks and prunes common dependency and build directories.
-
-An unknown network-origin repository is offered for tracking **only** if
-end-of-session analysis reports substantive continuation-worthy work there.
-Discovering, listing, or casually reading one never prompts. Declining records a
-caravan-wide ignored decision; the work still reaches the machine handoff.
-
-Repositories with no origin or a local-only origin can be tracked only by explicit
-command, and linked on another machine only by naming an existing Project ID.
-
-Nested repositories attribute work to the nearest enclosing tracked repository.
-
-### 1.8 Handoffs
-
-After a session that produced a new transcript, the same agent is asked to resume
-the conversation and write a short structured continuation note. Satchel — not the
-agent — files it into the Sync Repo.
-
-The note is injected into the next session's starting context for that Project,
-including on another machine.
-
-One visible Project at launch scope gets a single note. Multi-repository sessions
-can produce one note per Project actually worked in plus one machine-scope note
-for everything outside them.
-
-The writer is deliberately starved: only the agent's own conversation home and an
-empty filesystem at the original working directory. No project contents, no
-`/host`, no SSH socket, no clipboard, no MCP tools, no skills, no machine state.
-
-It runs the agent's normal default model at low reasoning effort, under a
-four-minute limit.
-
-### 1.9 Machine knowledge
-
-Three tiers per machine:
-
-- **Notes** — concise current operational truth, injected into every session on
-  that machine, 750-word soft limit.
-- **Inventory** — a broad dated system reference, listed by path and generation
-  time, read on demand.
-- **Guides** — substantial reusable procedures, one current file per topic, listed
-  by path and title, read on demand.
-
-Every session can write its own machine's knowledge and read every other
-machine's, read-only.
-
-The **Machine Baseline** is an optional first inventory. An authenticated agent
-inspects the real host through a read-only mount, shows the user its proposed
-files for approval, and writes into the synced machine directory. Offered once per
-machine; deferrable and permanently suppressible.
-
-### 1.10 Skills
-
-Exactly one skill library, shared by both agents and all machines, mounted
-read-write at each agent's native skills path. Installing a skill is an agent
-writing a complete folder there; there is no host-side install command and Satchel
-owns no source format or update protocol.
-
-At session exit every top-level entry is validated. Malformed attempts move to a
-machine-local quarantine and never sync; a previously committed valid version is
-restored in their place. Valid changes are listed, committed, and pushed even when
-no handoff was written.
-
-A newly installed skill can be assumed discoverable only from the next session.
-
-### 1.11 MCP servers
-
-Servers are registered once — name, URL, auth mode — and the registry syncs.
-Tokens are stored separately and may be synced or kept machine-local, with local
-winning. At every session start the registry replaces the managed portion of the
-agent's native configuration.
-
-### 1.12 Side effects, summarized
-
-Creates and writes a private state directory; clones, commits to, and pushes a
-user-specified Git repository; builds and removes a container image and
-containers; creates and removes executable files on the user's `PATH`; may
-generate an SSH keypair and copy it to Unraid flash; edits the Unraid boot script
-within a delimited block; makes outbound HTTPS requests to the GitHub API, the raw
-content host, and every registered MCP endpoint; changes ownership of a small
-exact allowlist of its own directories.
-
-Narration goes to stderr; report output goes to stdout.
+Every statement is intended to be a fact about the world — about operating
+systems, container engines, version control, the third-party command-line tools
+involved, or the people using them. Where a statement is instead an open
+question, it appears in section 1 and is deliberately left unresolved.
 
 ---
 
-## 2. External contracts that must be preserved
+## 1. Decisions not yet made
 
-Everything below is depended on by something outside the program.
+### 1.1 The scope question, first
 
-### 2.1 CLI grammar
+The evidence in section 8 points at breadth rather than carelessness. The prior
+implementation exposed roughly seventy distinct user-visible capabilities. Its
+defects did not cluster in one badly-written area; they clustered at the seams
+*between* capabilities — where a feature added for one purpose was reached
+through a path built for another. That is the signature of a surface area larger
+than any single implementation strategy can keep coherent, not of undisciplined
+work.
 
-```text
-satchel [--host] [--unsafe-home] [--with <dir>]... <command> [args]
+**So the first question is: how many of the capabilities in 1.3 should exist at
+all?**
 
-satchel claude [--host] [--unsafe-home] [--with <dir>]... [claude-args...]
-satchel codex  [--host] [--unsafe-home] [--with <dir>]... [codex-args...]
+The tradeoff is real in both directions. Each capability was added because
+something concretely failed without it — none is decorative, and the volume of
+external-system behavior in section 7 exists precisely because each one turned
+out to be harder than it looked. But every capability multiplies the number of
+reachable states, and the defects concentrate exactly where those states meet. A
+smaller program with fewer promises would have fewer seams to get wrong, at the
+cost of pushing work back onto the person using it.
 
-satchel init
-satchel sync
-satchel status [--ignored]
-satchel skills [list]
-satchel skills remove [name]
-satchel key [--persist]
-satchel retire [machine]
-satchel track [project-id]
-satchel untrack [project-id]
-satchel settings
-satchel settings <SETTING> <value> [--local]
-satchel doctor
-satchel mcp [list]
-satchel mcp add [name] [url] [--no-auth]
-satchel mcp remove [name]
-satchel link [claude|codex]...
-satchel unlink [claude|codex]...
-satchel uninstall [--purge] [--yes|-y]
-satchel import <claude|codex>
-satchel image [--rebuild]
-satchel update
-satchel version
-satchel --version
-satchel help
-satchel --help
-satchel -h
+This question is not answered here. It should be answered before any other
+question in this section, because most of the others dissolve if the answer is
+"fewer".
+
+### 1.2 Questions answered inconsistently
+
+Each of these was resolved one way in one place and another way elsewhere, or
+was documented as one thing and behaved as another, or had a mechanism built for
+it that nothing ever used. None is resolved here.
+
+**Should a setting be able to apply to every machine at once, or only to the
+machine it is set on?**
+A layered configuration model was built — a shared layer overridden by a
+per-machine layer, a flag to force the per-machine layer, and user-facing text
+promising that settings apply everywhere unless that flag is given. Every
+setting that actually exists is per-machine, so the shared layer is never
+written and the flag never changes anything. The read path works; only the write
+path is unreachable. *Tradeoff:* fleet-wide settings are the whole point of
+shared state, but every setting identified so far genuinely describes one
+machine's hardware or local policy, and a setting that must differ per machine
+is actively harmful if it propagates.
+
+**May the machine's root directory be mounted into a session that still calls
+itself sandboxed?**
+The primary working directory and the additional working directories answer this
+differently. An override flag exists that permits the root directory as the
+primary mount, while the additional-directory path refuses it unconditionally
+with no flag that relaxes it. Both paths describe themselves as enforcing the
+same promise. *Tradeoff:* an escape hatch that cannot be opened is not an escape
+hatch; but an escape hatch that voids the program's central safety claim while
+the interface still says "sandboxed" is a lie the user cannot see.
+
+**What is the attribution scope of a session that deliberately has no sandbox?**
+Discovery of repositories is disabled for such sessions, on the grounds that
+scanning an entire machine is inappropriate. Visibility of already-known
+repositories is simultaneously unrestricted for them, on the grounds that such a
+session can reach everything anyway. So a no-sandbox session can file work
+against any repository the machine has ever recorded, but can never cause a new
+one to be recorded. *Tradeoff:* consistency argues for picking one; but a
+full-machine scan is genuinely expensive and genuinely invasive, while refusing
+to attribute work the session really did do is genuinely lossy.
+
+**When something is missing, may the program ask?**
+Some prompts are guarded by a check for an interactive terminal and some are
+not. At least one unguarded prompt is reachable from an unattended path, and at
+least one comparable decision elsewhere is explicitly declined when
+unattended — the same question answered opposite ways in two places.
+*Tradeoff:* asking is the only way to obtain a secret the program does not have,
+and failing silently produces a session configured with a broken integration;
+but a program that can block forever waiting for input nobody will type is worse
+than one that starts degraded and says so.
+
+**Is validation of shared state a gate or a diagnostic?**
+Two answers coexist deliberately: commands *about* the shared state fail hard on
+malformed input, while commands that merely *use* it degrade and continue. This
+is a defensible split, but the boundary is drawn per-command rather than
+per-operation, so whether a given piece of malformed data stops you depends on
+which command you happened to run. *Tradeoff:* failing loudly is how people find
+out something is broken; failing loudly on the command they run fifty times a
+day is how they learn to ignore it.
+
+**Who wins when two machines both write?**
+The shared store is written wholesale by every participant, so two machines
+changing unrelated entries collide. Automatic reconciliation was built, worked,
+and was then deliberately removed as disproportionate — leaving "back out and
+tell the human" as the answer. *Tradeoff:* never guessing is safe and cheap and
+means a machine can silently fall behind indefinitely; merging is more code and
+can pick the wrong side, but a personal tool used by one person across several
+machines has an unusually strong claim that both sides are wanted.
+
+**Should a capability's cost be paid where it is defined or where it is used?**
+Version information about the containerized tools was deliberately cached at
+build time so that publishing it costs nothing at session end. The reporting
+commands that display the same information start a container to ask for it
+directly. *Tradeoff:* fresh is more correct; a status command that takes seconds
+is a status command people stop running.
+
+**What counts as "this program's own file" when the file lives in a directory
+another tool owns?**
+Managed regions are written into configuration files belonging to the agent
+tools, delimited by markers. The other tool appends to the same files at
+unpredictable positions. Rescue logic exists for one specific collision observed
+in practice. *Tradeoff:* owning a whole file is unambiguous but destroys
+anything the other tool put there; owning a region is cooperative, but the
+boundary is only as good as the marker discipline and the other tool has never
+agreed to it.
+
+**How much should be undoable versus prevented?**
+Malformed additions to shared content are preserved locally rather than deleted,
+and never cleaned up automatically. Deliberate removals are deleted outright
+with version-control history as the only recovery path. *Tradeoff:* these are
+opposite philosophies applied to adjacent operations; unbounded preservation
+accumulates junk nobody revisits, while relying on history assumes the user is
+comfortable with it.
+
+**Are the escape hatches for suppressing automated work supported interfaces?**
+Environment variables exist that disable end-of-session summarization and force
+the no-sandbox mode. Neither appears in any user-facing documentation or help
+output. A rebuild flag for the environment image is likewise real, used
+internally, and undocumented. *Tradeoff:* undocumented switches are how
+automation quietly gets built on things that were never promised; documenting
+them makes them permanent.
+
+**How much should the program promise about a platform it cannot test?**
+One platform with a RAM-backed root filesystem receives substantial special
+handling: boot-time restoration, alternative install locations, credential
+persistence to removable storage. The handling is real and load-bearing.
+*Tradeoff:* the platform genuinely breaks a normal install, and supporting it
+well is a large fraction of the total accidental complexity; a second such
+platform would need a generalization that does not exist and cannot honestly be
+designed from one example.
+
+**Should discovery be recursive, and how deep?**
+Repositories are found by walking the mounted directories, with a fixed
+exclusion list of directory names that commonly contain vendored checkouts.
+*Tradeoff:* the list is a guess that will be wrong for some ecosystem; excluding
+nothing makes launching from a large parent directory slow enough to notice;
+requiring explicit enumeration removes the convenience that motivated recursive
+discovery at all.
+
+**What does "the latest" mean when several machines write timestamped records
+concurrently?**
+Ordering is by name, which encodes a timestamp generated on the writing machine.
+Machine clocks are not synchronized, and two machines can produce records for
+the same instant. *Tradeoff:* a total order requires coordination the design
+deliberately lacks; an approximate order is usually right and occasionally shows
+the wrong record as newest.
+
+**Should the program act on a repository it has not been told about?**
+Unknown repositories with a portable origin trigger a question at the end of a
+session, but only when the summarizing model judges the work in them
+"substantive". That judgement is made by a language model against a prose
+definition. *Tradeoff:* asking about every repository ever seen is unusable;
+delegating the threshold to a model means the threshold is neither stable nor
+inspectable.
+
+**Is an agent run that is not a normal session still a session?**
+Two additional kinds of agent run exist — one that inspects the machine, one
+that summarizes a conversation — and the promises made about "every session"
+hold for neither. Neither publishes the environment contract that third-party
+installers detect. Both mount an instruction file written for a *different*
+run, so each is told about resources it does not have. *Tradeoff:* giving every
+agent run the full contract contradicts the deliberate minimalism that makes the
+summarizer safe; but a documented guarantee that silently excludes two of the
+three cases is not a guarantee, and an agent told it has a resource it lacks
+behaves worse than one told nothing.
+
+**Does a safety hold survive the process that set it?**
+A refusal to publish machine knowledge — because it might contain a secret, or
+because it failed a structural check — is recorded only for the lifetime of the
+running process. The content it refused to publish is left where the next run
+will collect and publish it without re-checking. *Tradeoff:* durable holds need
+somewhere to live and a way to be cleared, which is more state and another thing
+to get stuck; process-scoped holds are free and correct exactly once.
+
+**What happens when two sessions run on one machine at once?**
+Nothing prevents it, and nothing accounts for it: the two share one agent home
+whose instruction and configuration files each rewrites at startup, and each
+publishes by sweeping in every change present in the shared working copy —
+including the other's in-flight edits. Exactly one mechanism, the passing of
+credentials through the process environment, was deliberately made
+concurrency-safe. *Tradeoff:* serializing sessions is a real restriction on a
+machine with several projects; making them independent requires per-session
+isolation of state that is currently shared precisely so it can persist.
+
+**Which spellings of a remote are the same repository?**
+Host names are compared case-insensitively everywhere, but *paths* are
+case-folded only for three named public forges. On any self-hosted service, two
+spellings differing only in case become two separate identities with separate
+histories. *Tradeoff:* case sensitivity of a repository path is genuinely a
+property of the hosting service, and guessing wrong in the other direction
+merges two repositories that are actually distinct; but a hard-coded list of
+three services silently behaves differently for everyone else.
+
+**Are the program's global options global?**
+Options that modify session behavior are accepted before *any* subcommand.
+Most are inert elsewhere, but the one that disables isolation is not: it
+silently changes what the diagnostic command reports about authentication and
+what the reporting commands consider visible. *Tradeoff:* a uniform option
+parser is simpler and lets the transparently-named commands feel native;
+per-command parsing means options are rejected where they do not apply, at the
+cost of the wrapper no longer behaving like the tool it wraps.
+
+**Is a malformed name normalized or rejected?**
+Enrolling a repository or naming a machine silently rewrites unacceptable
+characters; the corresponding removal and load paths reject the same input
+fatally. A machine whose hostname contains a character the validator refuses is
+therefore accepted at setup and then fails every subsequent command.
+*Tradeoff:* normalizing is friendlier and means the user never sees a
+constraint; rejecting is honest and means the name the user typed is the name
+they get. Doing both, in different places, is the one option that is certainly
+wrong.
+
+**How much of a superseded format must a new version understand?**
+Three different answers coexist: one obsolete layout is read as a fallback and
+migrated, another causes every command to fail until a human fixes it by hand,
+and a third is accepted indefinitely with no plan to stop. At least one
+documented reorganization has no migration path at all, so a participant that
+has not caught up simply finds its content unmounted. *Tradeoff:* compatibility
+code is permanent weight and was explicitly rejected once in favor of a
+coordinated one-time migration — which is only available to someone who controls
+every participant simultaneously.
+
+### 1.3 Capability inventory
+
+Every user-visible capability the prior implementation exposed. The final column
+is for the reader to fill in.
+
+| # | Capability | Keep / Cut / Defer |
+|---|---|---|
+| 1 | Run an agent session in an isolated, disposable environment scoped to the working directory | |
+| 2 | Support more than one agent tool through the same interface | |
+| 3 | Run a session with isolation deliberately off, machine reachable, full privilege | |
+| 4 | Mount additional working directories alongside the primary one, repeatably | |
+| 5 | Override the refusal to start where the mount would expose the user's whole home | |
+| 6 | Provide transparently-named commands so the wrapped tools are invoked by their own names | |
+| 7 | Accept the program's own options both before and after the agent name | |
+| 8 | Let a session authenticate outbound version-control operations without exposing key material | |
+| 9 | Obtain such an authentication channel automatically when the host has keys but no usable agent | |
+| 10 | Give a session access to the desktop clipboard so images can be pasted in | |
+| 11 | Give in-session commits an authorship identity derived from the host's | |
+| 12 | Mark mounted repositories trusted so version control will operate despite ownership mismatch | |
+| 13 | Warn before launch when the session's identity will not be able to write the mounted directories | |
+| 14 | Generate per-session instructions describing what the agent can and cannot see and do | |
+| 15 | Prevent the containerized agent tools from attempting to update themselves | |
+| 16 | Disable the agent tool's own inner sandbox where the outer one already provides isolation | |
+| 17 | Produce a continuation summary automatically after a session that did real work | |
+| 18 | Attribute that summary to each tracked repository the session actually worked in | |
+| 19 | Ask, at most once, whether an unknown repository with substantive work should be tracked | |
+| 20 | Let the user deliberately skip summarization while it is running | |
+| 21 | Let automation suppress summarization entirely | |
+| 22 | Bound how many summaries are retained per scope | |
+| 23 | Inject the most recent relevant summary into the next session's starting context | |
+| 24 | List, on demand, the other repositories a session can see, rather than inlining all their context | |
+| 25 | Explicitly enroll the enclosing repository, optionally joining an existing identity | |
+| 26 | Globally stop tracking a repository and discard its active summaries | |
+| 27 | Treat different spellings of the same remote as one identity | |
+| 28 | Discover repositories recursively within the mounted roots, before and after a session | |
+| 29 | Cache the mapping from local checkout paths to global identities, per machine | |
+| 30 | Interactively set up a machine: name it, connect shared storage, recover a partial prior attempt | |
+| 31 | Create the shared store at a local or network filesystem path when none exists | |
+| 32 | Refuse to silently repoint an existing installation at a different shared store | |
+| 33 | Reconcile shared state on demand | |
+| 34 | Continue running sessions when shared state is unusable, instead of blocking | |
+| 35 | Return an interrupted or conflicted shared store to a clean state without discarding local work | |
+| 36 | Remove a machine's contribution from shared state | |
+| 37 | Preserve, rather than delete, files left by an interrupted prior setup | |
+| 38 | Register external tool-servers once and have every machine and agent configured for them | |
+| 39 | Store per-server credentials either shared or machine-local, at the user's choice | |
+| 40 | Translate the server registry into each agent tool's own configuration format | |
+| 41 | Diagnose why a registered server endpoint is unreachable, distinguishing likely causes | |
+| 42 | Share one library of agent extensions across every machine and every agent | |
+| 43 | Publish a machine-readable contract so third-party installers can find that library | |
+| 44 | Validate the library's packaging and isolate malformed contributions without deleting them | |
+| 45 | List the installed extensions | |
+| 46 | Remove an extension everywhere, by name or from a picker | |
+| 47 | Carry installer-owned metadata without interpreting it | |
+| 48 | Produce a first structured description of the machine by letting an agent inspect it read-only | |
+| 49 | Refresh that description later | |
+| 50 | Defer or permanently decline the offer to produce it | |
+| 51 | Scan newly-written machine knowledge for apparent secrets before it leaves the machine | |
+| 52 | Warn when always-loaded machine knowledge exceeds a size that degrades every session | |
+| 53 | Let a session read other machines' knowledge, read-only | |
+| 54 | Install via a single piped command from a published URL | |
+| 55 | Support a fully self-contained, relocatable installation | |
+| 56 | Add and remove the transparently-named commands after installation | |
+| 57 | Restore installation artifacts at boot on platforms that rebuild their root filesystem | |
+| 58 | Generate and display the machine's public key for granting access to shared storage | |
+| 59 | Persist that key and known-host records to storage that survives a reboot on such platforms | |
+| 60 | Update itself from the published source, reporting what changed | |
+| 61 | Check periodically whether an update exists, without blocking anything | |
+| 62 | Build the containerized environment, and rebuild it on demand | |
+| 63 | Reclaim the superseded environment image after a rebuild | |
+| 64 | Copy the host's existing agent login into the sandbox so sessions start authenticated | |
+| 65 | Uninstall, choosing between removing the program and removing all local data | |
+| 66 | Clean up containers it can prove it created, and refuse to touch any it cannot | |
+| 67 | Report overall state: machines, repositories, summary counts, servers, extensions, unsynced work | |
+| 68 | Diagnose the machine end to end and say specifically what is wrong | |
+| 69 | Show and change settings | |
+| 70 | Report its own version and usage | |
+| 71 | Publish what each machine is actually running so version drift across machines is visible | |
+| 72 | Detect an environment where its own isolation mechanism cannot work, and refuse clearly | |
+
+---
+
+## 2. What the program is for
+
+A person who works across several machines wants to hand a coding agent a
+directory and have it be useful immediately — without that agent being able to
+damage anything outside the directory, and without re-establishing context,
+credentials, tool access, or accumulated know-how on each machine separately.
+
+The value, in priority order:
+
+**Containment that is honest.** The agent runs where it cannot reach the rest of
+the machine, and it is *told* that — so when asked about a file it cannot see it
+says the file is out of reach, rather than inventing an answer or reporting the
+file absent. Containment the agent does not know about produces confidently
+wrong behavior, which is worse than no containment. The boundary must be real,
+and the program must never claim a boundary it did not establish. Where the user
+deliberately removes the boundary, the agent must be told that too, because the
+correct behavior on the other side is different.
+
+**Continuity across time and across machines.** Work stops mid-thought. Resuming
+should not mean reconstructing what was being attempted, what was already tried,
+and what was about to happen next — and it should not require being at the
+machine where the work happened. This is the single property that makes the tool
+worth installing on a second machine.
+
+**A working environment on arrival.** The agent tool's credentials, access to
+the external tool-servers the person uses, the extensions they have written or
+vendored, and the durable facts about the machine they are on — all present
+without setup. Configured once, available everywhere. The alternative is a
+per-machine ritual that people skip, after which the machines diverge and "it
+works on the other box" becomes unanswerable.
+
+**Never being blocked by the plumbing.** The machinery that carries context
+between machines is bookkeeping; the session is the product. No state that
+bookkeeping can get into may prevent an agent from starting — not a conflict,
+not a corrupted record, not an unreachable network, not a version written by a
+newer copy of the program elsewhere. A person locked out of their agent by their
+notes-syncing system will stop using the notes-syncing system, and rightly.
+
+**Recoverability over cleverness.** When something is ambiguous, the program
+should preserve what it has, say plainly what it did not do, and leave the
+person a normal way to fix it with ordinary tools. It must never resolve an
+ambiguity on the user's behalf in a way that silently discards one of the
+possibilities.
+
+Explicitly *not* the point: being a platform, a service, or a daemon; managing
+multi-user access; providing production-grade guarantees; or being something the
+user thinks about. Success is that it is invisible.
+
+---
+
+## 3. Invariants
+
+Violating any of these is a real failure, not an inelegance.
+
+**Key material never enters the isolated environment.** The environment may be
+granted the *ability to use* a credential — an authentication channel, a
+short-lived token — but the credential itself must never be readable, copyable,
+or persistable from inside. A session that can exfiltrate a private key has
+defeated the reason the isolation exists.
+
+**A session's declared boundary is the boundary.** Nothing outside the mounts
+the user asked for is reachable from an isolated session. If the program cannot
+establish that, it must refuse rather than proceed with a weaker boundary under
+the same name.
+
+**Isolation is never silently weakened.** Any reduction in the boundary is
+either requested explicitly by the user or refused. A path that widens access as
+a side effect of handling an error is a defect, however convenient.
+
+**The agent is never told the environment is safer or more capable than it is.**
+Claiming that outbound authentication works when it does not, or that a path is
+writable when it is not, sends the agent — and then the user — to debug the
+wrong system entirely. Silence is acceptable; a false promise is not.
+
+**Bookkeeping state can never prevent a session from starting.** No corruption,
+conflict, version skew, or network failure in the shared store may block the
+core operation.
+
+**Conflicting concurrent edits are never resolved by guessing.** If two machines
+changed the same thing, the program either merges by a rule the user can
+predict, or backs out entirely and says so. It must never pick a side silently,
+and must never leave the shared store in a state that requires specialist
+recovery.
+
+**Local work is never lost to a failed remote operation.** A failed network
+operation must leave a retryable state with the local contribution intact.
+
+**Nothing is deleted that the program cannot prove it owns, or that the user did
+not name exactly.** This binds every destructive path: installed commands,
+containers, images, configuration, shared entries, stored state. An ownership
+marker that a second installation would also have written is not proof.
+
+**Malformed or uncertain user data is preserved, not discarded.** Where the
+program rejects something, the rejected thing must remain recoverable.
+
+**Agent-tool credentials and conversation transcripts never enter shared
+storage.** This line does not move regardless of how convenient it would be.
+
+**A destructive operation on shared state never runs unattended.** Anything that
+removes a machine, a repository's accumulated context, or another participant's
+data requires a human present.
+
+**Newer versions elsewhere cannot disable older ones.** Shared records must
+remain usable by participants that do not understand every field in them. One
+machine upgrading must never stop the others working.
+
+**A diagnostic never reports success from an absence of data.** "Nothing
+disagreed" and "nothing was compared" are different results and must be reported
+differently.
+
+**Automated context capture never overwrites good context with worse.** A
+failed, empty, or malformed attempt to record continuation state must leave the
+previous state in place.
+
+**Unattended helper work receives only what its task requires.** A process
+invoked to summarize a conversation gets the conversation and nothing else — not
+the project, not the machine, not credentials, not tool access.
+
+**A decision not to publish something outlives the process that made it.**
+Content withheld because it might contain a secret, or because it failed a
+structural check, must stay withheld until the condition is actually resolved.
+A hold that expires when the program exits, while the content it withheld
+remains staged for the next run to collect, is equivalent to no hold at all.
+
+**A guarantee stated once is enforced on every path that can reach it.** Where
+the program promises a property — that a boundary holds, that a class of failure
+cannot block the core operation, that a contract is published to every agent
+run — that promise must be a property of the operation, not a check repeated at
+each call site where someone remembered it.
+
+**What a consumer is told about the data is how the data is actually
+ordered, named, and selected.** Describing one selection rule to an agent or a
+user while implementing a different one produces confident, unfalsifiable wrong
+answers.
+
+---
+
+## 4. Frozen external contracts
+
+Only things that break a third party or an existing installation if changed.
+Quoted exactly.
+
+### 4.1 Published install entry point
+
 ```
-
-The three session options are consumed by Satchel and never forwarded. All other
-agent arguments retain their order.
-
-Version line:
-
-```text
-satchel 2.0.0
-```
-
-Message prefixes:
-
-```text
-satchel: ...
-satchel: warning: ...
-satchel: error: ...
-```
-
-Colour is decided independently for stdout and stderr. Precedence: a non-empty
-`NO_COLOR` disables it unconditionally; `TERM=dumb` disables it; otherwise
-`CLICOLOR_FORCE=1` forces it on; otherwise colour requires that descriptor to be a
-terminal.
-
-### 2.2 Installation entry point
-
-```sh
 curl -fsSL https://raw.githubusercontent.com/SwaggyMike/satchel/main/install.sh | bash
 ```
 
-Installer inputs:
+The path `main/install.sh` on that host, reachable unauthenticated, is
+referenced by existing documentation and by users' own notes. The installer must
+remain executable by piping into a shell with no arguments and no guaranteed
+terminal.
 
-```text
-SATCHEL_BIN=<install-directory>      # a directory, not the executable path
-SATCHEL_DIR=<state-directory>
-SATCHEL_SHIMS=y|<anything-else>      # exact "y" enables shims
+Environment variables honored by that entry point, which existing installs and
+scripted deployments already pass:
+
+- `SATCHEL_BIN` — names a **directory** for a self-contained install, not an
+  executable path.
+- `SATCHEL_DIR` — overrides the state location.
+- `SATCHEL_SHIMS` — set to `n` to skip creating the transparently-named
+  commands.
+
+### 4.2 User-facing command names
+
+The primary command is `satchel`. The transparently-named commands it installs
+onto the user's path are exactly `claude` and `codex`. These names collide by
+design with the tools they wrap; changing which name is installed changes what a
+user's existing shell invocations do.
+
+Existing subcommand names, all reachable today:
+
+```
+claude  codex  init  sync  status  skills  key  retire  track  untrack
+settings  doctor  mcp  link  unlink  uninstall  import  image  update
+version  help
 ```
 
-Directory precedence, used identically by the installer and by `satchel link`:
+Global option spellings: `--host`, `--unsafe-home`, `--with <dir>`. These are
+accepted both before and after the agent name, because the wrapped tools do not
+use those names and users rely on `claude --host` being equivalent to
+`satchel --host claude`.
 
-1. `$SATCHEL_BIN` if set
-2. the directory containing the resolved command, if a `.satchel` directory sits
-   beside it
-3. `/usr/local/bin` if writable
-4. `$HOME/.local/bin`
+### 4.3 On-disk forms of prior installs that must be detected for removal
 
-The installer must refuse a `SATCHEL_BIN` whose last component is `satchel` when
-its parent is on `PATH` — that would make the shell resolve a directory as the
-command. The installed script is mode `755`.
+An existing installation must be recognizable so an uninstall or upgrade does
+not orphan it, and so files belonging to *another* installation or to the real
+wrapped tool are never removed.
 
-### 2.3 Host environment variables
+Current generated wrapper files contain this exact marker line:
 
-Read at runtime:
-
-```text
-SATCHEL_DIR SATCHEL_BIN SATCHEL_ENGINE SATCHEL_SSH SATCHEL_CLIPBOARD
-SATCHEL_UID SATCHEL_GID SATCHEL_HOST SATCHEL_NO_HANDOFF SATCHEL_SELF
-SATCHEL_UNRAID_MARKER SATCHEL_UNRAID_BOOT_DIR SATCHEL_UNRAID_LIVE_BIN_DIR
-HOME PATH TERM TMPDIR NO_COLOR CLICOLOR_FORCE
-SSH_AUTH_SOCK GIT_SSH_COMMAND
-WAYLAND_DISPLAY XDG_RUNTIME_DIR DISPLAY XAUTHORITY
 ```
-
-The three Unraid path overrides and `SATCHEL_SELF` exist so the behavior is
-testable off that platform. Whether they are public API is an **open question**.
-`SATCHEL_HOST` and `SATCHEL_NO_HANDOFF` are undocumented — see §6.5.
-
-### 2.4 Shim file format
-
-Exactly three lines, path shell-quoted:
-
-```bash
-#!/usr/bin/env bash
 # satchel shim
-exec /mnt/user/appdata/satchel/satchel claude "$@"
 ```
 
-Two recognition rules must both survive:
+and a body line of exactly this form, where the first field is a shell-quoted
+absolute path to the installed command and the second is the agent name:
 
-- **Generic ownership** (enough to report or replace, not to delete): a line
-  matching `^# satchel shim$`, **or** a legacy line matching the extended regular
-  expression `^exec[[:space:]]+satchel[[:space:]]+(claude|codex)([[:space:]]|$)`.
-- **Exact ownership** (required before deleting): the file contains, as a whole
-  line, the literal `exec %q <agent> "$@"` this installation would generate for its
-  own resolved path. A lexical sibling spelling is accepted only while it resolves
-  to the same installed command — this exists so a distribution aliasing `/home` to
-  `/var/home` does not break uninstall.
-
-### 2.5 State directory
-
-Selected in order: a non-empty `SATCHEL_DIR`; a real `.satchel` directory beside
-the resolved command; `$HOME/.satchel`. Created mode `700`.
-
-```text
-config                       machine-local settings, sourced as Bash
-sync/                        the Sync Repo clone
-home/claude/                 persistent Claude login, config, SSH trust, transcripts
-home/codex/                  persistent Codex login, config, SSH trust, transcripts
-mcp-tokens.local.env         machine-only MCP tokens, mode 600
-script-sha                   full installed commit SHA plus newline
-install-path                 resolved absolute command path plus newline
-image-agents                 "claude <version>, codex <version>" plus newline
-update-check                 decimal Unix timestamp
-quarantine/skills/           invalid skill attempts, retained locally
-recovery/sync-<UTCSTAMP>/    content preserved from an interrupted clone destination
+```
+exec /path/to/satchel claude "$@"
 ```
 
-Quarantine and recovery stamps use `%Y%m%dT%H%M%SZ` in UTC.
+An older generation of wrapper, still present on long-standing installs, has no
+marker comment and must also be recognized. It matches:
 
-### 2.6 Machine config file
-
-Written by setup, sourced by every run, values shell-escaped:
-
-```bash
-# Satchel config — plain bash, sourced by satchel.
-# See and change settings with 'satchel settings'; this file is the
-# machine-local layer (it wins over the synced settings.env).
-MACHINE=debianlaptop
-SYNC_URL=git@example.com:user/satchel-sync.git
-# SATCHEL_ENGINE=  # force docker or podman (default: auto-detect)
-# SATCHEL_SSH=1  # forward the host's ssh-agent into sessions so git push works (0 = off)
-# SATCHEL_CLIPBOARD=1  # forward the desktop clipboard socket so pasting images works (0 = off)
-# SATCHEL_UID=  # user id inside session containers (default: your uid; 1000 if root)
-# SATCHEL_GID=  # group id inside session containers (default: SATCHEL_UID)
+```
+^exec[[:space:]]+satchel[[:space:]]+(claude|codex)([[:space:]]|$)
 ```
 
-The supported setting keys are exactly:
+Matching the marker alone is sufficient to decide "some installation owns this".
+It is **not** sufficient to decide "this installation owns this", because a
+second installation on the same machine writes the identical marker. Ownership
+requires matching the exact generated body line.
 
-```text
-SATCHEL_ENGINE SATCHEL_SSH SATCHEL_CLIPBOARD SATCHEL_UID SATCHEL_GID
+On platforms whose root filesystem is rebuilt at boot, a managed region is
+appended to the platform's boot script, delimited by exactly:
+
+```
+# >>> satchel boot persistence >>>
+# <<< satchel boot persistence <<<
 ```
 
-Precedence: built-in default < synced `settings.env` < machine `config`. Both files
-use the same shell-assignment format and both are **sourced as executable Bash** —
-see §6.4.
+That region must be detectable and removable by any future version, and a region
+with a start marker but no end marker must be left alone rather than guessed at.
 
-Machine names and Project IDs both match:
+Further paths load-bearing for existing installs on that platform: the boot
+script at `/boot/config/go`; the key backup directory `/boot/config/ssh/root/`;
+and a previous version's backup of the boot script kept beside it with the
+suffix `.satchel-bak`. Platform detection reads the file
+`/etc/unraid-version`.
 
-```text
-^[A-Za-z0-9][A-Za-z0-9._-]*$
+### 4.4 Third-party CLI grammar this program drives
+
+These belong to other projects. They are recorded because the exact spellings
+are load-bearing and were arrived at by failure.
+
+Unattended continuation-summary invocation for one agent:
+
+```
+claude --continue --strict-mcp-config --tools "" --effort low -p <prompt>
 ```
 
-### 2.7 Sync Repo layout
+Unattended continuation-summary invocation for the other:
 
-```text
-profile.md                              global context; first line not injected
-preferences.md                          global context; first line not injected
-repositories.json                       sole authority for repository identity
-mcp.json                                MCP server registry
-mcp-tokens.env                          synced tokens, mode 600
-settings.env                            synced settings layer
-.gitignore                              must contain: /skills/shared/.system/
-skills/shared/                          the one shared skill library
-skills/shared/.gitkeep
-skills/shared/skills-lock.json          optional, installer-owned, valid JSON
-projects/<id>/handoffs/                 per-Project handoffs
-projects/<id>/handoffs/.gitkeep
-machines/<name>/notes.md
-machines/<name>/inventory.md
-machines/<name>/guides/<topic>.md
-machines/<name>/projects.json           machine-local checkout path cache
-machines/<name>/environment.json        published runtime versions
-machines/<name>/handoffs/               machine-scope handoffs
-machines/<name>/.baseline-skip          presence disables the baseline offer
+```
+codex exec resume --last --skip-git-repo-check --ignore-user-config --ignore-rules -c 'sandbox_mode="danger-full-access"' -c 'model_reasoning_effort="low"' <prompt>
 ```
 
-Default context files are created as:
+Interactive launch options for that same tool, where the inner sandbox must be
+disabled because it cannot create namespaces inside an already-isolated
+environment and self-update checks must not run:
 
-```markdown
-# Profile
+```
+codex -c 'sandbox_mode="danger-full-access"' -c check_for_update_on_startup=false
 ```
 
-```markdown
-# Preferences
-```
+Both tools honor `DISABLE_AUTOUPDATER=1`.
 
-Content from line 2 onward is concatenated as global context, Profile first.
+### 4.5 Third-party file formats this program reads or writes
 
-`projects/<id>/` contains **only** `handoffs/`. The directory name *is* the Project
-ID. A `project.json` inside a Project directory is a hard schema violation.
-Project directories and machine directories must not be symlinks.
-
-Baseline suppression file content:
-
-```text
-suppressed at 2026-07-25T12:34:56Z
-```
-
-### 2.8 `repositories.json`
+One agent's configuration is JSON with a server map under the key `mcpServers`,
+whose entries take this shape, credentials inline:
 
 ```json
-{
-  "github.com/example/project": { "status": "tracked", "project": "project-id" },
-  "github.com/example/ignored": { "status": "ignored" }
-}
+{"type": "http", "url": "https://example/endpoint", "headers": {"Authorization": "Bearer <token>"}}
 ```
 
-Empty file is `{}`. Rules:
-
-- root is an object; every key a non-empty canonical identity string; every value
-  an object
-- `status` is exactly `"tracked"` or `"ignored"`
-- a tracked entry has a non-empty string `project` naming an existing Project
-- no two tracked origins may use the same Project ID
-- every key must already be canonical — re-canonicalizing it is a no-op
-- **unknown fields must be accepted**, so a newer version elsewhere in the caravan
-  cannot brick older machines
-
-The documented rule that ignored entries carry no Project is **not enforced** —
-see §6.10.
-
-### 2.9 Canonical origin form
-
-Portable origins begin with `ssh://`, `git://`, `http://`, or `https://`, or match
-the SCP-like `user@host:path`. Canonicalization applies, in order:
-
-1. Remove everything from the first `#` or `?` onward.
-2. Remove one trailing `/`.
-3. For scheme URLs: drop the scheme, drop user information through the last `@` in
-   the authority, lowercase the hostname, retain any `:<port>`, join authority and
-   path with `/`.
-4. For SCP-like forms: drop the user portion, lowercase the host, change the first
-   separator from `:` to `/`.
-5. Remove one trailing lowercase `.git`.
-6. Remove one trailing `/`.
-7. For identities beginning `github.com/`, `gitlab.com/`, or `bitbucket.org/`,
-   lowercase the entire identity.
-
-```text
-git@github.com:Example/Repo.git
-https://github.com/example/repo
-=> github.com/example/repo
-
-https://token@example.com/Owner/Repo.git?x=secret
-=> example.com/Owner/Repo
-```
-
-No credential may ever reach the registry, a candidate listing, or a handoff.
-
-### 2.10 `machines/<machine>/projects.json`
-
-```json
-{ "paths": { "/absolute/checkout": { "project": "project-id" } } }
-```
-
-Empty file is `{"paths":{}}`. Path keys must be absolute; `project` is required and
-must name an existing Project; unknown fields accepted.
-
-### 2.11 `mcp.json`
-
-```json
-{
-  "servers": {
-    "homeassistant": { "url": "http://host:8123/api/mcp", "auth": "bearer" },
-    "public":        { "url": "https://example.test/mcp",  "auth": "none" }
-  }
-}
-```
-
-Empty file is `{ "servers": {} }`. Server names match `^[A-Za-z0-9_-]+$`. `url`
-must be a non-empty string whose every code point is `>= 32` and is not `34` (`"`),
-`92` (`\`), or `127` — so it can be embedded verbatim in a TOML double-quoted
-string. `auth` is exactly `"bearer"` or `"none"`. Unknown fields accepted.
-
-### 2.12 Token files
-
-`mcp-tokens.env` (synced) and `mcp-tokens.local.env` (machine-only):
-
-```text
-homeassistant=<token bytes through end of line>
-another_server=<token bytes through end of line>
-```
-
-The first exact `<server>=` line wins within a file; the local file is consulted
-before the synced one. Writers set mode `0600`, which Git does not preserve across
-machines.
-
-### 2.13 `machines/<machine>/environment.json`
-
-```json
-{
-  "satchel": "2.0.0",
-  "commit": "7179842",
-  "engine": "docker",
-  "agents": "claude 2.1.217, codex 0.145.0"
-}
-```
-
-All four values are strings; `satchel` must be non-empty; the others may be empty
-when unavailable. `commit` is the first 7 hex characters of the recorded install
-SHA. `agents` has the exact shape `claude <version>, codex <version>`. Unknown
-fields accepted. The file is rewritten only when its content actually changes, so
-ordinary sessions produce no commit churn.
-
-### 2.14 Handoff files
-
-```text
-projects/<project-id>/handoffs/YYYY-MM-DDTHH-MM-SSZ--<machine>.md
-machines/<machine>/handoffs/YYYY-MM-DDTHH-MM-SSZ.md
-```
-
-The stamp is UTC `%Y-%m-%dT%H:%M:%SZ` with every `:` replaced by `-`, so filenames
-sort lexically in chronological order. Filenames are the durable ordering key;
-nothing may depend on parsing a date out of the body.
-
-```markdown
-<!-- satchel-handoff project=<project-id-or-> machine=<machine> date=2026-07-25T20:36:15Z -->
-## Goal
-## Done
-## In flight
-## Next steps
-## Gotchas
-```
-
-`project=-` denotes machine scope. All five headings must appear as complete
-lines. Retention is the newest **100** files per scope; older ones are removed from
-the working tree and remain in Git history.
-
-### 2.15 Multi-scope writer protocol
-
-```text
-=== project: <project-id> ===
-=== candidate: candidate-<integer> ===
-=== machine ===
-```
-
-The exact no-op response:
-
-```text
-NO_HANDOFF
-```
-
-Chunks are filed only if they contain all five headings. Chunks naming a scope not
-on the roster are dropped. Multiple chunks for one scope are merged into a single
-file rather than overwriting each other.
-
-### 2.16 Machine Baseline marker
-
-First line of the inventory:
-
-```html
-<!-- satchel-machine-baseline version=2 generated=2026-07-25T12:34:56Z -->
-```
-
-For migration, a version-1 marker is recognized in the inventory, or in the notes
-file when the inventory is absent:
-
-```html
-<!-- satchel-machine-baseline version=1 generated=2026-07-25T12:34:56Z -->
-```
-
-### 2.17 Skill Library contract
-
-The synchronized library is `skills/shared/`. Skill names match
-`^[A-Za-z0-9][A-Za-z0-9._-]*$`. Every user skill is a real top-level directory
-containing `SKILL.md`, with no nested `.git`, no top-level symlink, and no broken
-or escaping symlink.
-
-The only allowed top-level metadata file is `skills/shared/skills-lock.json`. Its
-schema is installer-owned; Satchel requires only a real non-symlink file
-containing valid JSON, never interprets or rewrites it, and never reports it as a
-skill.
-
-Required ignore line:
-
-```gitignore
-/skills/shared/.system/
-```
-
-Quarantined names:
-
-```text
-<UTC YYYYMMDDTHHMMSSZ>--<original-name>
-<UTC YYYYMMDDTHHMMSSZ>--<original-name>-<collision-number>
-```
-
-### 2.18 Agent-native MCP materialization
-
-**Claude** — `<agent home>/.claude.json`, unrelated root fields retained, the
-entire `mcpServers` property replaced:
-
-```json
-{
-  "mcpServers": {
-    "server": {
-      "type": "http",
-      "url": "https://example.test/mcp",
-      "headers": { "Authorization": "Bearer <token>" }
-    }
-  }
-}
-```
-
-Servers without a token omit `headers`.
-
-**Codex** — `<agent home>/.codex/config.toml`, exactly one managed marker pair,
-inserted before the first TOML table:
+The other agent's configuration is TOML and does **not** accept a credential
+inline — only the *name of an environment variable* to read one from:
 
 ```toml
-# >>> satchel mcp >>>
-# managed by satchel — rebuilt every session start
-[mcp_servers.server]
-url = "https://example.test/mcp"
-bearer_token_env_var = "SATCHEL_MCP_TOKEN_SERVER"
-# <<< satchel mcp <<<
+[mcp_servers.<name>]
+url = "https://example/endpoint"
+bearer_token_env_var = "<ENV_VAR_NAME>"
 ```
 
-Content outside the markers must survive. A missing, duplicate, nested, or unclosed
-marker pair is an error that leaves the file byte-identical.
+Authentication state belonging to those tools, detected to decide whether a
+login exists and copied when importing one:
 
-The token variable name is `SATCHEL_MCP_TOKEN_<SERVER_NAME>`, with lowercase ASCII
-uppercased and `-` becoming `_`. Other permitted characters are retained — see
-§6.24 for the collision this creates.
-
-### 2.19 Generated session instructions
-
-```text
-Claude: /home/satchel/.claude/CLAUDE.md
-Codex:  /home/satchel/.codex/AGENTS.md
+```
+~/.claude/.credentials.json
+~/.claude.json          (keys: oauthAccount, primaryApiKey)
+~/.codex/auth.json
 ```
 
-Exact first line:
+Instruction files those tools read automatically from their own home
+directories:
 
-```markdown
-# Managed by Satchel — rewritten at every session start; do not edit.
+```
+~/.claude/CLAUDE.md
+~/.codex/AGENTS.md
 ```
 
-Section headings, in order, present when applicable:
+Extension directories those tools scan at startup. The second resolves relative
+to that tool's own home-directory override:
 
-```markdown
-## Where you are running
-## Satchel Skill Library
-## Machine Notes (<machine>)
-## Global context
-## Tracked projects in this session
-## Handoff from the previous session on this project (machine <name>, <date>)
-## Handoff from the previous session on this machine outside any project (machine <name>, <date>)
+```
+~/.claude/skills
+${CODEX_HOME:-$HOME/.codex}/skills
 ```
 
-Behavioral requirements, treated as a public interface:
+Conversation-history locations, whose modification times are the only available
+evidence that a session did anything:
 
-- Every path named must be **absolute**. Never `~` — a Host Session runs as root
-  and `~` resolves to the wrong place.
-- A sandboxed session's text must say other machine files are *outside the
-  sandbox*, so the agent answers that rather than "the file does not exist".
-- A Host Session's text must say the container's bare `/etc`, `/usr`, `/var` are
-  disposable and the real copies are under `/host`.
-- The SSH paragraph must match the probed state and must not claim pushing works
-  unless an identity is actually loaded.
-- With no usable Sync Repo, the skill-library and machine-notes sections are
-  omitted entirely.
-
-### 2.20 Container image
-
-Tag `localhost/satchel:latest`.
-
-```dockerfile
-FROM docker.io/library/node:22-bookworm-slim
-RUN apt-get update \
- && apt-get install -y --no-install-recommends \
-      git curl wget ca-certificates jq ripgrep less procps openssh-client \
-      python3 make g++ bubblewrap wl-clipboard xclip \
- && rm -rf /var/lib/apt/lists/*
-RUN npm install -g @anthropic-ai/claude-code @openai/codex
-ENV HOME=/home/satchel
-RUN mkdir -p /home/satchel && chmod 0777 /home/satchel
-RUN sed -Ei 's#^((root|node):[^:]*:[^:]*:[^:]*:[^:]*:)[^:]*:#\1/home/satchel:#' /etc/passwd
-WORKDIR /home/satchel
+```
+~/.claude/projects
+~/.codex/sessions
 ```
 
-Nothing is pinned; every machine builds its own from floating tags. Builds pass
-`--pull`.
+One of those tools materializes a version-specific bundled-extension tree named
+`.system` beneath its extension directory. It belongs to the installed version
+of that tool and must never be treated as user content.
 
-Ownership label carried by every container Satchel creates:
+Both tools locate a conversation to resume partly by the working directory the
+conversation originally ran in.
 
-```text
-io.github.swaggymike.satchel.managed=true
+### 4.6 Remote APIs consumed
+
+```
+https://api.github.com/repos/<owner>/<repo>/commits/main
+https://api.github.com/repos/<owner>/<repo>/contents/satchel?ref=main
+https://api.github.com/repos/<owner>/<repo>/compare/<old>...<new>
+https://raw.githubusercontent.com/<owner>/<repo>/<ref>/satchel
 ```
 
-Handoff helper container name:
+### 4.7 Contract published to third-party extension installers
 
-```text
-satchel-handoff-<host-process-id>
+Extension installers running inside a session detect this environment
+mechanically. Changing these names breaks installers this program does not
+control:
+
 ```
-
-### 2.21 Mount and environment contract
-
-| Host source | Container destination | Mode |
-| --- | --- | --- |
-| agent home | `/home/satchel` | rw |
-| `sync/machines/<machine>` | `/home/satchel/machine` | rw |
-| `sync/projects` | `/home/satchel/projects` | ro |
-| `sync/machines` | `/home/satchel/machines` | ro |
-| `sync/skills/shared` | `/home/satchel/.claude/skills` or `/home/satchel/.codex/skills` | rw |
-| `$SSH_AUTH_SOCK` | `/run/ssh-agent.sock` | rw |
-| Wayland socket | `/run/satchel/wayland-0` | rw |
-| `/tmp/.X11-unix` | `/tmp/.X11-unix` | rw |
-| `$XAUTHORITY` | `/run/satchel/Xauthority` | ro |
-| project directory | the same absolute path | rw |
-| each extra directory | the same absolute path | rw |
-| `/` (Host Session) | `/host` | rw |
-| `/` (Machine Baseline) | `/host` | ro |
-
-Environment inside a session:
-
-```text
-HOME=/home/satchel
-TERM=<host TERM, default xterm-256color>
-DISABLE_AUTOUPDATER=1
 SATCHEL_SESSION=1
-SATCHEL_SESSION_MODE=sandbox|host
-SATCHEL_SKILLS_DIR=/home/satchel/.claude/skills   (or the codex path)
-SSH_AUTH_SOCK=/run/ssh-agent.sock
-GIT_SSH_COMMAND=ssh -o StrictHostKeyChecking=accept-new
-WAYLAND_DISPLAY=/run/satchel/wayland-0
-DISPLAY=<host DISPLAY>
-XAUTHORITY=/run/satchel/Xauthority
-SATCHEL_MCP_TOKEN_<NAME>=<token>
+SATCHEL_SESSION_MODE=host|sandbox
+SATCHEL_SKILLS_DIR=<absolute path to the shared extension library>
 ```
 
-`SATCHEL_SESSION`, `SATCHEL_SESSION_MODE`, and `SATCHEL_SKILLS_DIR` are a
-documented contract for skill installers to detect the runtime.
+### 4.8 Exit codes
 
-MCP token variables must be passed **by name only** (`-e NAME`), never
-`-e NAME=value`, so values never appear in the host process list.
-
-Engine flags, sandboxed:
-
-```text
---init --user <uid>:<gid> --cap-drop ALL --security-opt no-new-privileges
-```
-
-Engine flags, Host Session:
-
-```text
---privileged --pid=host --network=host --user 0:0 -v /:/host
-```
-
-No `--init` in Host Session mode — it needs a private PID namespace. **No `--pid`
-flag at all** in sandboxed mode — Docker rejects `--pid=private`.
-
-SELinux hosts add `--security-opt label=disable`. Rootless Podman adds:
-
-```text
---userns=keep-id --passwd-entry '$USERNAME:*:$UID:$GID::/home/satchel:/bin/bash'
-```
-
-The handoff writer additionally gets, and **only** gets:
-
-```text
---tmpfs <original-cwd>:rw,nosuid,nodev,noexec,mode=1777
--w <original-cwd>
-```
-
-### 2.22 Agent CLI invocations
-
-Contracts with third-party CLIs; preserve verbatim unless those CLIs change.
-
-```text
-# interactive
-claude <user args>
-codex -c 'sandbox_mode="danger-full-access"' -c check_for_update_on_startup=false <user args>
-
-# handoff writer
-claude --continue --strict-mcp-config --tools "" --effort low -p "<prompt>"
-codex exec resume --last --skip-git-repo-check --ignore-user-config --ignore-rules \
-  -c 'sandbox_mode="danger-full-access"' -c 'model_reasoning_effort="low"' "<prompt>"
-
-# machine baseline
-claude "<prompt>"
-codex -c 'sandbox_mode="danger-full-access"' -c check_for_update_on_startup=false "<prompt>"
-```
-
-Version probe, run inside the image:
-
-```sh
-printf "claude %s, codex %s" "$(claude --version 2>/dev/null | cut -d" " -f1)" "$(codex --version 2>/dev/null | cut -d" " -f2)"
-```
-
-Login detection and import paths:
-
-```text
-Claude:  ~/.claude/.credentials.json          (presence proves login)
-         ~/.claude.json                       (login only if .oauthAccount or
-                                               .primaryApiKey is non-empty —
-                                               mere existence proves nothing,
-                                               because MCP materialization
-                                               creates one before any login)
-Codex:   ~/.codex/auth.json
-```
-
-Transcript directories watched to decide whether a conversation happened:
-
-```text
-<agent home>/.claude/projects
-<agent home>/.codex/sessions
-```
-
-### 2.23 Automatic commit subjects
-
-Users read these in Git history, so they are a contract:
-
-```text
-add machine <machine>
-sync from <machine>
-mcp: add <server>
-mcp: remove <server>
-skills: remove <skill>
-machine baseline v2 on <machine>
-skip machine baseline on <machine>
-session: <project-id-or-untracked> on <machine>
-settings: <setting> on <machine>
-track project <project-id>
-ignore project <project-id>
-retire <machine>
-```
-
-### 2.24 Unraid contract
-
-```text
-/etc/unraid-version          detection marker
-/boot/config/go              boot script
-/boot/config/go.satchel-bak  last version that parsed
-/boot/config/ssh/root/       flash key directory
-/usr/local/bin               live link directory
-```
-
-Managed block, every path shell-escaped:
-
-```bash
-# >>> satchel boot persistence >>>
-ln -sf <installed-satchel> [<owned-claude-shim> <owned-codex-shim>] /usr/local/bin/
-mkdir -p /root/.ssh && chmod 700 /root/.ssh
-cp <boot-key-directory>/id_ed25519* /root/.ssh/ 2>/dev/null && chmod 600 /root/.ssh/id_ed25519
-cp <boot-key-directory>/known_hosts /root/.ssh/ 2>/dev/null
-```
-
-Only shims this installation owns appear on the `ln` line. Staging file pattern
-`/boot/config/go.satchel-tmp.XXXXXX`, always in the same directory so the swap is a
-rename. This content must exist in exactly one place — it was previously duplicated
-in the installer and the README, and the copies drifted.
-
-### 2.25 Network endpoints
-
-Satchel exposes no service API. Outbound:
-
-```text
-https://api.github.com/repos/SwaggyMike/satchel/commits/main
-https://api.github.com/repos/SwaggyMike/satchel/contents/satchel?ref=main
-https://api.github.com/repos/SwaggyMike/satchel/compare/<old>...<new>
-https://raw.githubusercontent.com/SwaggyMike/satchel/<commit-or-main>/satchel
-https://raw.githubusercontent.com/SwaggyMike/satchel/main/install.sh
-```
-
-Plus the configured Sync Repo `origin` and each registered MCP URL.
-
-### 2.26 Exit codes
-
-| Code | Meaning |
-| --- | --- |
-| `0` | success |
-| `1` | generic failure |
-| `2` | bad usage of the build tooling |
-| `130` | SIGINT — must propagate out of every long operation |
-| `131` | handoff deliberately skipped via SIGQUIT |
-
-Diagnostics exit non-zero when any check reported a hard failure. Warnings do not
-cause failure.
+- `0` — success.
+- `1` — every fatal error, without further discrimination. The diagnostic
+  command also exits `1` when it found problems.
+- `2` — reserved by the build tooling for usage errors.
+- `130` — the operation was interrupted by the user at the terminal. This must
+  not be reported as a failure of the thing being attempted.
+- `131` — the user deliberately skipped an optional unattended step, as distinct
+  from the step failing.
 
 ---
 
-## 3. Real-world constraints
+## 5. Capabilities
 
-### 3.1 Platform and dependencies
+Each paragraph states what must be accomplished and what must never happen.
 
-- **Linux only.** Targets: Debian/Ubuntu, Fedora (SELinux), Unraid.
-- **Bash**, using arrays, process substitution, `$'…'` quoting, named traps —
-  effectively 4.4 or newer.
-- Host commands: `git`, `jq`, `curl`, OpenSSH client utilities, and common GNU
-  utilities including `timeout`, `readlink`, `find`, `stat`, `sed`, `awk`, `grep`,
-  `mktemp`, `chmod`. Root-host SSH fallback additionally requires `setpriv` from
-  util-linux. `sudo` is used only as a fallback for removals and the boot swap.
-- Docker or Podman. Docker is preferred when both are present **and its daemon
-  answers**; Podman is selected on mere command presence — see §6.39.
-- Sessions require only `git` and `jq` on the host. Reporting commands must work
-  with no container engine at all.
-- Running Satchel inside another application container is supported only when the
-  selected engine sees the same host paths.
-- The image targets Node 22 on Debian Bookworm slim with latest agent packages at
-  build time. Codex native-skill compatibility was verified against **0.145.0**.
+**Isolated session.** Give an agent tool a working environment containing the
+user's chosen directory or directories and nothing else of the machine, running
+under an identity that cannot escalate, and discard that environment when the
+session ends. It must never expose paths the user did not name, never run with
+more privilege than the isolation requires, and never present itself as isolated
+when it is not.
 
-### 3.2 Permission and isolation model
+**Unisolated session.** Provide an explicitly-requested mode where the machine
+itself is the subject of the work: real filesystem reachable, full privilege
+available, the container serving only as packaging. It must be impossible to
+enter this mode by accident, and the agent must be told unambiguously which
+paths are the machine's and which belong to the disposable environment, because
+the same absolute path means different things in each mode.
 
-- A sandboxed session never runs as root inside the container by default; a
-  root-run host falls back to `1000:1000`. (UID 0 is nonetheless accepted — §6.6.)
-- Sandboxed sessions drop all capabilities and set `no-new-privileges`; Host
-  Sessions deliberately do neither.
-- The container is packaging, not protection, in Host Session mode — this must be
-  announced. Normal launches must be silent, because agent TUIs immediately repaint
-  the screen and a routine banner only flashes.
-- Ownership repair is restricted to an **exact allowlist**: the two agent homes,
-  the shared skill library, and this machine's synced knowledge directory. Success
-  is silent. It must never touch project files or arbitrary host paths.
-- SSH forwarding authorizes signing with every identity in the agent for the life
-  of the session. Key bytes never enter the container, but the session can
-  authenticate anywhere those identities are authorized.
-- Clipboard forwarding exposes content copied *while* a session runs, including
-  passwords. On some Wayland compositors the socket grants more than clipboard.
-- A Host Session under rootless Podman maps container root to the unprivileged host
-  user, so root-owned host paths still reject writes. That is a host property, not
-  something the program can work around.
+**Boundary refusal.** Recognize when the requested working directory would place
+the user's credentials, keys, or the program's own state inside the session, and
+refuse. It must not silently proceed, and it must not refuse without offering
+the honest alternative. Whatever override exists must behave identically across
+every path that can establish a mount.
 
-### 3.3 Must-never-happen invariants
+**Outbound authentication.** Let work done inside a session reach remote
+version-control hosts without the session ever being able to read, copy, or
+retain a credential. Where no such channel can be established, say so before the
+session starts, in terms of what will concretely fail. It must never report a
+channel as working without having confirmed it works for the identity the
+session will actually run as.
 
-- The Sync Repo must never prevent an agent from starting. Every mount, read, and
-  push is conditional on a single "syncing is usable" predicate that can be turned
-  off for the rest of a run.
-- The clone must never be left mid-rebase for the user to untangle.
-- Satchel must never resolve a conflict on the user's behalf.
-- Agent login credentials and transcripts must never sync.
-- Bearer token values must never appear in container-engine arguments.
-- SSH private key files must never enter a session mount.
-- A sandboxed session must never mount `$HOME`, an ancestor of it, `/`, or
-  Satchel's state directory — the last not even with the override flag.
-- Shims, containers, images, arbitrary scripts, and state trees must never be
-  deleted without proven ownership or an exact user-named target.
-- A malformed boot script must never be installed, and the real file must never be
-  truncated in place.
-- Purge must never delete the upstream repository.
-- Malformed or uncertain user data must be quarantined or preserved, never
-  silently deleted.
-- Baseline secret scanning must never echo a suspected secret.
+**Desktop clipboard access.** Let images pasted from the host desktop reach the
+agent. Prefer the narrower of the available display protocols when both exist.
+It must be silently absent on machines with no desktop, and disableable by users
+who consider a live channel to their clipboard unacceptable.
 
-### 3.4 Ordering and atomicity
+**Session briefing.** Generate, fresh for each session, a description of what
+the agent can see, what it cannot, what will and will not work, where shared
+resources are, and what the user's durable context is. It must never assert a
+capability that was not verified, and must stay small enough that adding to it
+does not degrade everything else in it.
 
-- SSH preparation must precede the first Sync Repo network operation, or an empty
-  desktop agent produces a misleading "cannot reach the Sync Repo" warning moments
-  before the key is loaded.
-- Interrupted-operation recovery must be checked **before** the upstream check — a
-  rebase detaches `HEAD`, so the upstream expression stops resolving in exactly the
-  state the guard exists to catch.
-- Synchronized state must be pulled and validated before being mounted or
-  materialized.
-- Instructions and native MCP config must be regenerated before the agent starts.
-- Argument composition must precede the final ownership repair, because composition
-  creates missing mount roots.
-- Ownership normalization runs immediately before a normal session, and again after
-  a Host Session so an unprivileged handoff writer can read the transcript.
-- Repository discovery runs both before and after the interactive agent, and
-  post-session discovery must precede attribution and candidate decisions.
-- The interrupt trap must be installed **before** startup work, not just before the
-  engine runs.
-- After the interactive engine exits, interrupts must be **ignored**, not merely
-  caught — a caught handler resets to default in child processes, and cleanup
-  spawns children.
-- Changes must be committed locally before any best-effort push, so an offline or
-  rejected push leaves a recoverable commit.
-- Machine registration must integrate remote history before pushing, so an ordinary
-  non-fast-forward is not misreported as a read-only deploy key.
-- Replacement of the installed command and of the boot script must be staged in the
-  destination directory and installed by same-filesystem rename.
-- Self-update: the **new** artifact must own the image rebuild.
-- Uninstall retirement must complete upstream before any local removal begins.
+**Continuation capture.** After a session that did real work, produce a compact
+structured summary of intent, progress, in-flight state, next steps, and
+hazards, and make it available to the next session anywhere. It must never run
+with access to anything beyond the conversation it is summarizing, never
+overwrite a good summary with a failed or malformed attempt, and never be
+mandatory — the user must be able to abandon it while it is running.
 
-### 3.5 Timeouts and bounds
+**Work attribution.** Determine which tracked repositories a session actually
+worked in and record continuation state separately for each, independent of
+where the session was launched. Work belonging to no tracked repository must
+still be retained, scoped to the machine. It must never infer identity from a
+directory name, and nested repositories must resolve unambiguously.
 
-| Operation | Bound |
-| --- | --- |
-| Session-start Sync Repo pull | 20 s |
-| Session-end best-effort pull and push | 30 s each |
-| Retirement pull and push | 30 s each |
-| Diagnostics remote reachability | 10 s |
-| MCP endpoint probe (per attempt) | 5 s |
-| Daily update probe | 5 s |
-| Handoff writer | 240 s |
-| Update-check frequency | at most once per 86 400 s |
+**Repository identity.** Treat different spellings of the same remote as one
+thing across all machines, and keep local checkout locations as disposable
+per-machine detail. It must never let two identities claim the same record, and
+never require a network round-trip to decide identity.
 
-The update-check timestamp is written **before** the probe, so an offline day costs
-one failed request rather than one per session. Not every network operation is
-bounded — see §6.34.
+**Shared state transport.** Carry context, registries, and extensions between
+machines over storage the user owns and can inspect with ordinary tools. It must
+degrade to local-only operation on any failure, never block the primary
+operation, and never leave the user's copy needing specialist recovery.
 
-### 3.6 Policy constants
+**Tool-server registry.** Let the user register external tool endpoints once and
+have every agent on every machine configured for them, including credentials
+where the user chooses to share them. It must never place a credential where the
+host's process list or another local user could read it, and never destroy
+configuration those tools wrote for themselves.
 
-- Handoff retention: **100** files per Project and per machine
-- Machine notes soft ceiling: **750** words
-- Machine Baseline version: **2**
+**Extension library.** Maintain one library of agent extensions shared by every
+agent and machine, writable from inside a session, and publish a contract so
+third-party installers can target it. It must validate packaging without
+interpreting content, isolate rather than delete anything malformed, and never
+propagate content the agent tools own themselves.
 
-These are guardrails, not data-loss rules — essential information should be
-consolidated or moved to a guide rather than discarded to satisfy a count.
+**Machine knowledge.** Maintain durable, tiered facts about each machine —
+always-loaded operational context, an on-demand detailed reference, and
+on-demand procedures — writable by agents during sessions and readable by
+sessions on other machines. It must keep the always-loaded tier small, never let
+it become an incident log, and never let apparent secrets leave the machine
+inside it.
 
-### 3.7 External-system constraints
+**Machine onboarding.** Offer, once an agent can authenticate, to have that
+agent inspect the machine read-only and propose an initial description for human
+approval. It must never permit modification of the machine during inspection,
+never write anything unapproved, and never expand into a normal session the user
+did not ask for.
 
-- **Unraid** rebuilds `/`, `/usr/local/bin`, and `/root` from flash at boot. State
-  must live on persistent `/mnt` storage; links and SSH material must be restored
-  through the boot script. Flash is unencrypted FAT and is a single point of failure
-  for the entire array configuration.
-- **Git 2.35+** rejects repositories owned by a different user unless explicitly
-  marked safe — routine on root-run hosts whose sessions use UID 1000.
-- **The same private repo is written from multiple machines.** Whole-file registries
-  make ordinary concurrent edits conflict even when the machines changed different
-  logical entries.
-- **Each machine's floating image build can contain different agent versions.**
-  Drift is expected and is reported, never auto-corrected.
+**Installation lifecycle.** Install by a single published command, place itself
+and its state so both survive whatever the platform does at boot, update itself
+atomically from published source, and uninstall cleanly with an explicit choice
+about local data. It must never leave a partially-written executable or boot
+script, and never remove anything it cannot prove it created.
+
+**Environment provisioning.** Build and maintain the containerized environment
+the agent tools run in, and make what each machine is actually running visible so
+divergence between machines is discoverable rather than mysterious. It must not
+require build tooling on the target machine beyond what it already needs, and
+must never reclaim an image something else still references.
+
+**Diagnosis.** Check the machine end to end — tooling, isolation mechanism,
+authentication, shared-storage reachability and divergence, platform-specific
+persistence, endpoint reachability — and report specifically what is wrong and
+what to do. It must distinguish "checked and found nothing wrong" from "had
+nothing to check", and must never skip reporting on one subsystem because a
+different one is broken.
+
+**Unsupported-environment detection.** Detect when the available isolation
+mechanism cannot actually reach this program's own files — the case where it is
+itself inside another container whose engine has a different filesystem view —
+and stop with an explanation rather than degrading into a cascade of mount
+errors.
 
 ---
 
-## 4. Edge cases and failure modes currently handled
+## 6. Environmental reality
 
-Stated as "when X happens, the program must Y."
+### 6.1 Platform targets
 
-### 4.1 Installation and initialization
+Linux on x86-64 and ARM, on machines the user administers themselves: laptops,
+home servers, and NAS appliances. Multi-user hardening is out of scope; the
+threat model is the agent's own mistakes, not a hostile local user.
 
-- When a required host command is missing, the installer must stop and name it.
-- When Unraid is detected with no persistent install directory supplied, an
-  interactive installer must ask; a non-interactive one must refuse the volatile
-  default and print the exact variable form required.
-- When the parent of an Unraid install directory does not exist, the installer must
-  stop rather than build a misleading chain on the RAM filesystem.
-- When the chosen install directory would occupy the `satchel` command path inside a
-  `PATH` directory, installation must stop before creating it.
-- When an existing `claude` or `codex` path is unrelated — **including a dangling
-  symlink** — installation or linking must skip it and continue.
-- When an install is already initialized, the installer must ensure the image
-  exists; if that build fails, the command must remain installed and the output must
-  give one exact retry command.
-- When the clone destination is a non-Git empty directory, it must be removed and
-  retried cleanly.
-- When it is a non-Git directory containing data, that data must be moved under
-  timestamped recovery storage, its new location reported, and the clone retried at
-  a clean path — never deleted or overwritten.
-- When it is a symlink or a non-directory file, initialization must refuse to move,
-  follow, or replace it.
-- When initialization is re-run with a URL textually different from the existing
-  origin, it must stop **before** changing either the clone or the config.
-- When an SSH clone fails, initialization must preserve Git's error, explain the
-  observed agent/key state, optionally generate and print a key, and allow an
-  in-place retry or a choice to continue without sync.
-- When a local Sync Repo target is absent, empty, or a non-Git directory,
-  interactive setup must offer to initialize a bare repository there.
-- When machine registration cannot push, the local clone and machine state must be
-  retained and the user directed to fix access and run explicit sync.
+At least one target platform rebuilds its root filesystem from removable storage
+at every boot. Anything at `/`, at the system-wide command directory, or in the
+superuser's home is gone after a reboot unless restored from persistent storage.
+On that platform the program frequently runs as the superuser while sessions
+deliberately do not.
 
-### 4.2 Session launch and runtime
+At least one target platform runs its container engine rootless, where the
+container's superuser maps to an unprivileged host account. Paths owned by other
+host accounts are unwritable from inside regardless of in-container privilege.
 
-- When no working container engine exists, a session must fail clearly; status and
-  settings must still report.
-- When Satchel is itself containerized and the daemon cannot bind-mount its real
-  local state, launch must stop with an unsupported nested-container explanation.
-- When the primary path is unsafe, an interactive launch must default to refusal and
-  offer Host Mode; a non-interactive launch must fail with an explanation of what
-  would have been mounted.
-- When an extra mount is unsafe, nonexistent, `/`, home-containing, or overlapping
-  private state, launch must fail before starting a container. Symlinks are resolved
-  before these decisions.
-- When a root host's mounted work paths are not writable by the session UID, launch
-  must warn with the affected paths, the exact `chown`, and the alternatives, while
-  still allowing the read-only session.
-- When a host Git identity appears after an agent config already exists, only the
-  missing fields are copied; existing values are never overwritten.
-- When startup is interrupted during SSH prompting, pulling, or the update check,
-  status 130 must propagate and later launch work must stop.
-- When the interactive agent exits non-zero, cleanup and best-effort handoff/sync
-  must still run, then the original status is returned.
-- When the engine becomes temporarily unhealthy after an interrupted run, cleanup
-  must continue with the already-selected engine rather than re-detecting.
-- When repeated interrupts arrive during cleanup, handoff generation, or syncing,
-  they must be ignored and the work must complete, in a separate process group.
-- When a Host Session or root-run operation leaves persistent files owned by root,
-  the next lifecycle must normalize only the allowlisted internal paths.
-- When the session produced no new transcript, no handoff is attempted and the
-  previous one is preserved.
+Not targets: macOS, Windows, and any environment where the user cannot install a
+container engine.
 
-### 4.3 SSH and clipboard
+### 6.2 Required of the host
 
-- When forwarding is disabled, launch must stay quiet about missing SSH and forward
-  no socket.
-- When the socket is absent, not a socket, or has no responding agent, it must not
-  be mounted.
-- When the agent answers with no identities, the socket must **still** be mounted,
-  so keys added on the host mid-session become usable immediately.
-- When a reachable agent is empty and a standard host key exists, that key is loaded
-  first. Supported names, in preference order: `id_ed25519`, `id_ecdsa`, `id_rsa`.
-- When no usable agent exists but a standard key does, a temporary per-session agent
-  is started — and it must be started **as the UID the session will run as**, not as
-  root with a chowned socket.
-- When the temporary agent starts but does not answer as that UID, readiness must
-  not be claimed; the agent must be torn down and failure reported.
-- When a root-owned shared agent cannot serve an unprivileged session UID, it must be
-  set aside deliberately **and the reason stated** — otherwise the fallback message
-  contradicts what the user can see.
-- When `setpriv` is missing on a root host, the program must say so plainly rather
-  than report "no key" for a key that is present.
-- When no usable identity can be provided, an interactive launch must explain that
-  SSH pushes will fail and wait for acknowledgement; a non-interactive launch warns
-  and continues.
-- When a passphrase prompt is interrupted, 130 must propagate and no temporary agent
-  may be left behind.
-- Loading an unencrypted standard key must produce no output at all.
-- The temporary agent survives until after the session-end push, then is destroyed.
-  The handoff writer never receives its socket.
-- When a Wayland socket is valid, it must be preferred over X11 and exposed at the
-  fixed absolute path.
-- When the compositor variables name no real socket, clipboard forwarding must
-  quietly do nothing.
+A container engine — either of the two dominant ones, which differ in ways
+section 7 details. Version control. A JSON processor. A URL fetcher. An SSH
+client, key generator, and agent. A privilege-dropping utility that accepts a
+*numeric* identity and does not consult the account database, because the
+identity a session runs as need not correspond to any named account.
 
-### 4.4 Synchronization
+### 6.3 Constraints imposed from outside
 
-- When the Sync Repo is unconfigured, sessions must still run and say nothing will
-  sync.
-- When synchronized state is malformed at startup, the session must continue with
-  syncing disabled and the reason explained. (Currently violated for one registry —
-  §6.2.)
-- When the same state is met by explicit sync or status, the command must fail and
-  name the invalid contract.
-- When a best-effort pull is offline or times out without leaving an operation in
-  progress, startup must warn and continue from local state.
-- When a best-effort pull is *interrupted*, startup must stop rather than misclassify
-  the interrupt as being offline.
-- When a pull conflicts, the operation must be aborted, unmerged state removed, the
-  local commit and pre-existing tracked edits preserved, a warning issued that
-  Satchel did not guess, and the session continued.
-- When a rebase started with autostash is aborted, pre-existing edits must be left
-  restored; the tree must not be reset merely to look clean, because those edits may
-  be the only surviving copy of interrupted work.
-- When automatic recovery cannot return the clone to a usable state, syncing must
-  degrade for that run.
-- When a session-end push or pull fails, the commit must remain on the local branch
-  and the user directed to explicit sync.
-- When status sees commits ahead of or behind upstream, it must report both counts.
-- When synchronized JSON has unknown fields but valid required ones, older versions
-  must continue.
-- When one tracked origin points at a missing Project, two origins claim one Project
-  ID, a path cache points at a missing Project, a Project or machine name is unsafe,
-  or obsolete per-Project metadata exists, strict validation must fail rather than
-  repair identity.
+**The agent tools are not pinned and are not this program's to version.** They
+are installed from a floating upstream tag into the environment image, which
+each machine builds independently whenever it happens to update. Two machines in
+the same setup will legitimately run different versions of the same tool.
+Preventing this means taking on release engineering for tools this program does
+not own; the only available response is to make the divergence visible.
 
-### 4.5 Projects and handoffs
+**The wrapped tools' configuration files are shared with the tools
+themselves.** They write to the same files at times this program does not
+control, including immediately before trailing content. Any managed region
+inside them must survive the other writer.
 
-- When a path is not inside a Git repository, explicit tracking must fail.
-- When a repository has no portable origin, candidate prompting must not occur;
-  explicit tracking must still work.
-- When one origin appears at multiple paths or machines, all must resolve to one
-  Project.
-- When two unrelated origins share a basename, generated IDs must remain distinct
-  (`-2`, `-3`, …).
-- When a requested Project ID already belongs to another origin, tracking must fail
-  rather than merge identities.
-- When an origin changes, the old path cache must be invalidated until the new
-  origin gets its own global decision.
-- When a repository lies only behind a symlink outside the declared roots, it must
-  not be discovered or offered.
-- When a candidate is named by the writer in an interactive terminal, Satchel must
-  ask whether to track it; when it is not named, it must not prompt.
-- When candidate enrollment fails, its work must be reassigned to the machine
-  handoff rather than discarded.
-- When operation is non-interactive, candidate work becomes machine-handoff content
-  while the origin stays undecided.
-- When a chunk names an unknown scope, it must be dropped without creating state for
-  the invented scope.
-- When multiple chunks resolve to one scope at one timestamp, they must be combined
-  into one file rather than overwrite one another.
-- When the writer returns `NO_HANDOFF` after exiting successfully, the prior handoff
-  remains.
-- When the writer exits non-zero, times out, or returns incomplete formatting, the
-  prior handoff remains and the warning must **distinguish process failure from
-  format failure** — a broken container must never read as a rambling model. A
-  process failure must include the writer's own last error line.
-- When the skip signal cancels the writer, its helper container must be stopped and
-  removed only after its ownership label is verified.
-- When an unrelated container already owns the predicted helper name, cleanup must
-  not delete it.
-- When a handoff header is truncated but its filename is valid, it must still
-  participate in latest-selection and retention.
-- When retention is exceeded, the lexically oldest filenames are removed first.
+**Ordering constraint — authentication before network.** Outbound authentication
+must be established before the first network operation against shared storage.
+*Reason:* an authentication channel that exists but holds no identity produces a
+failure indistinguishable from the remote being unreachable. Attempting the
+network first therefore reports a misleading startup failure moments before the
+identity that would have fixed it is loaded.
 
-### 4.6 Machine Baseline
+**Ordering constraint — identity normalization around the session.** Ownership
+of the program's own writable state must be normalized for the identity the
+session will run as, after anything that writes to that state and before the
+session begins — and again after a session that ran with elevated privilege.
+*Reason:* on hosts where the program runs as the superuser and sessions do not,
+the program creates files the session then cannot modify; and where a privileged
+session ran previously, it left files a subsequent unprivileged one cannot
+touch.
 
-- When neither agent is authenticated, no offer appears.
-- When the requested invocation begins with a native version or help flag, the offer
-  must not replace that informational request.
-- When only one agent is authenticated during an explicit refresh, it is selected and
-  the reason stated.
-- When both are, the user chooses, defaulting to Claude.
-- When the user chooses "not now", the requested session continues.
-- When the user chooses "don't ask again", a synchronized suppression marker is
-  written and the requested session continues.
-- When the user accepts the automatic first-launch offer, success, failure, or
-  interruption returns directly to the shell without a second agent launch.
-- When the baseline exits cleanly but does not create or change the inventory, it is
-  a failure.
-- When the inventory lacks the exact version marker, automatic syncing must stop and
-  the user be told to review the machine knowledge.
-- When newly added content resembles a secret, the suspected value must not be
-  printed and automatic syncing must stop.
-- When notes exceed the soft limit, content is retained and a consolidation warning
-  shown.
-- When a peer machine exists but has published no runtime report, diagnostics must
-  say comparison data is missing rather than report agreement.
+**Ordering constraint — trust declaration before any repository operation.**
+Mounted repositories must be declared trusted before the agent can use version
+control on them. *Reason:* version control refuses outright to operate on a
+repository owned by a different account, which is the normal case wherever the
+host account and the session identity differ. Without the declaration every
+version-control command fails with an ownership error that reads like a
+corrupted repository.
 
-### 4.7 MCP
+**Ordering constraint — repository discovery must also happen after the
+session.** *Reason:* a session can clone or initialize repositories that did not
+exist when it started, and work in them is exactly the work worth attributing.
 
-- When a name contains disallowed characters, add and remove must fail.
-- When a URL is empty or contains a quote, backslash, control character, or DEL,
-  validation must fail before either agent configuration is touched.
-- When a required field is missing or auth is neither `bearer` nor `none`,
-  validation fails; unknown fields are ignored.
-- When a bearer token is missing, interactive materialization offers synced or local
-  storage and allows skipping.
-- When local and synced tokens both exist, local wins.
-- When Codex's marker pair is malformed, materialization must leave the file
-  byte-identical and remove its scratch files.
-- When Codex has written learned tool-approval or project-trust tables inside the
-  managed area, rematerialization must rescue them and re-emit them **outside** the
-  rebuilt block.
-- When a probe receives 404, TLS-only success, HTTP-only success for an HTTPS URL, or
-  no response, each distinct condition must be reported distinctly.
-- When diagnostics find an unreachable endpoint it counts as a hard failure; a merely
-  absent token is a warning.
+**Ordering constraint — self-replacement must be a rename within one
+filesystem.** *Reason:* section 7.6 explains the interpreter behavior that makes
+any other approach corrupt the running program.
 
-### 4.8 Skills
+### 6.4 Timeouts and bounds, with justification
 
-- When a top-level entry is unsafely named, not a real directory, a symlink, missing
-  `SKILL.md`, contains nested Git metadata, or holds a broken or escaping symlink, it
-  must be quarantined locally and never synced.
-- When it is a top-level file other than a valid lock file, the warning must note it
-  may be installer metadata rather than a skill.
-- When the invalid entry replaced a committed valid skill or lock file, the committed
-  copy must be restored after quarantine.
-- When that committed copy is also invalid, it too is quarantined and not synced.
-- When the agent's runtime-owned system tree appears, it stays local, absent from
-  Sync Repo changes and from user-skill reports.
-- When a named skill does not exist or the name is unsafe, removal fails without
-  deleting anything else.
-- When interactive removal is cancelled or the number invalid, the library is
-  unchanged.
-- When the pre-removal pull is interrupted, removal must not proceed.
-- When lock metadata still mentions a removed skill, removal completes but warns and
-  leaves the lock file untouched.
-- A named or numbered removal **is** the authorization — no second confirmation — and
-  Git history is the recovery path.
-
-### 4.9 Unraid, updates, diagnostics, retirement, uninstall
-
-- When the boot block has no closing marker, update and removal must report it and
-  leave the whole file unchanged — never silently repaired.
-- When a proposed boot file is empty, has duplicate markers, contains an unresolved
-  link target, or fails a syntax check, it must not replace the current one.
-- When a valid boot file is replaced, the last syntactically valid version is kept as
-  the backup.
-- When state lives outside persistent storage on Unraid, diagnostics must emit a hard
-  failure, not a warning.
-- When the commit API is unavailable during update, it must warn and fall back to the
-  branch, noting the content may be minutes stale.
-- When update cannot stage beside the installed command, it must leave the running
-  script untouched and fail with a writability explanation.
-- When the download does not parse, the installed command is unchanged.
-- When the script is unchanged, update must still rebuild the image and may backfill
-  the commit record.
-- When the image build fails after replacement, the commit record must not advance.
-- When uninstall cannot prove the running script is an installed command, or the state
-  path is not a Satchel state tree, it must refuse.
-- When purge would discard uncommitted, unpushed, or no-upstream work, it must warn
-  specifically before deletion.
-- When a stopped labeled container exists, uninstall may remove it; active, paused, or
-  unverifiable ones must be left alone.
-- When image deletion fails, the engine's actual error and an engine-appropriate
-  inspection command must be printed and the container preserved.
-- When interactive retirement of the current machine starts from a dirty clone, it must
-  stop before mutation. When its commit or push fails after mutation, it must restore
-  the prior local state and stop before removing local files.
-- When the current machine is retired directly, the command must explain that local
-  state remains and ask separately before deleting it.
-- Non-interactive uninstall must never retire a machine.
-
-### 4.10 Reporting
-
-- When no engine is installed, reporting commands must print full output and exit
-  successfully.
-- When peers exist but none have reported, the drift check must say so rather than
-  report agreement from an empty data set.
-- When the caravan is a single machine, no drift line is printed at all.
+| Bound | Value | Justification |
+|---|---|---|
+| Unattended summarization | 240 s | It resumes and re-reads a full conversation transcript, the slowest model operation in the system. Shorter values truncated legitimate work; this is the point past which a hung container is more likely than a slow one. |
+| Shared-store fetch at session start | 20 s | On the critical path of every launch and best-effort by definition. Long enough for a normal fetch over a home network, short enough that an unreachable remote is not a perceptible delay before the agent appears. |
+| Shared-store publish at session end | 30 s | Off the critical path, so a longer allowance is affordable; a push does more work than a fetch. |
+| Remote reachability probe in diagnostics | 10 s | The user is watching a diagnostic run and expects it to terminate; distinguishing "slow" from "unreachable" is not the check's purpose. |
+| Update availability probe | 5 s | Entirely optional information. Any delay it adds to a launch is unjustifiable. |
+| Endpoint reachability probe | 5 s | Several are probed in sequence during diagnostics; the total must stay bounded. |
+| Update check interval | 86 400 s | Frequency at which an update is worth mentioning, against a network round-trip per launch. Recorded *before* the probe runs, so a day spent offline costs one failed request rather than one per session. |
+| Retained continuation summaries | 100 per scope | Enough to read back as a record of how work arrived where it is; ten was measured to be too few and evicted real history. Nothing in a session scales with this number, so the bound exists only to keep the active set a working set rather than an archive. |
+| Always-loaded machine knowledge | 750 words, soft | Injected into every session's context, so its size is paid on every launch and dilutes everything else present. Soft because a guardrail that discards essential information to satisfy a count is worse than the overrun. |
+| Published-source cache staleness | ~5 min | Not chosen — imposed by the CDN in front of the published raw source. See 7.6. |
 
 ---
 
-## 5. Non-obvious domain knowledge
+## 7. Hard-won knowledge
 
-Each exists because something outside the program behaves in a way that is not
-obvious.
+Non-obvious behavior of external systems that the prior implementation had to
+work around. This is the material that cannot be re-derived by reasoning.
 
-**An SSH-agent socket's ownership and mode do not determine which users it serves.**
-OpenSSH checks peer credentials and accepts only root or the agent process's own
-effective UID. A temporary agent for a UID-1000 session must itself run as UID 1000;
-chowning the socket is insufficient. Root-run hosts previously announced an agent
-that reset every in-session connection.
+### 7.1 OpenSSH and its agent
 
-**A reachable agent proves nothing about identities.** The common real-world failure
-is a forwarded agent that answers but was never given a key, so states must be probed
-and distinguished. Exit codes are load-bearing: `0` identities loaded, `1` reachable
-but empty, `2` nothing answering.
+**The agent authenticates its clients by peer credentials, not by file
+permissions.** It serves a connection only when the connecting process's
+effective user id is either 0 or exactly equal to the agent process's own user
+id; otherwise it closes the socket. Changing the socket's ownership or mode has
+no effect whatsoever on this check. An agent started by the superuser cannot be
+used by a session running as an unprivileged identity, no matter how the socket
+is chowned. The agent process itself must run as the identity it will serve.
 
-**A reachable agent also does not mean every Git remote will work.** The session gets
-identities but not the host's SSH client config, so aliases, ports, usernames, and
-per-host key selection disappear. This distinction exists to stop agents debugging
-credentials only the host user can change.
+**This makes reachability tests misleading unless performed as the right
+identity.** A privileged process probing such an agent gets a successful answer —
+because the agent does serve the superuser — and concludes the channel works.
+Every client inside the unprivileged session then fails. The observable symptom
+is an authentication failure at push time, which sends debugging toward the
+remote host's access controls and away from the agent that was never reachable.
+Any readiness claim must be established from the identity that will actually use
+the channel.
 
-**Private key material must never be copied to a readable path.** Feeding a key to
-the agent through a descriptor opened before privileges drop gets it there without it
-ever existing anywhere the sandbox could read.
+**A socket existing proves nothing.** It can point at a dead process, or at a
+live agent holding no identities at all — the latter being the common case when
+an agent is forwarded over SSH but was never loaded on the originating machine.
+These three states (identities present; agent answering but empty; nothing
+answering) need different responses and are distinguishable by exit status: `0`,
+`1`, and anything else respectively.
 
-**OpenSSH resolves home through the passwd database, not `$HOME`.** Both root and the
-image's normal user need `/home/satchel` as their passwd home, or SSH trust records
-land in disposable paths and evaporate every session — defeating trust-on-first-use.
-On Unraid, a root Host Session additionally tripped over the host's dangling
-`/root/.ssh` symlink inside the container.
+**An empty agent can become useful mid-session.** Identities added on the host
+while a session is running are immediately visible to it, because the socket is
+live. So an empty agent is worth forwarding; a dead one is not, since mounting
+it can only produce confusing in-container errors.
 
-**A numeric session UID may have no passwd account name.** Privilege-dropping tools
-requiring a login name cannot serve an arbitrary configured UID, which is why a
-numeric-ID-aware utility is required.
+**Resolving `~` does not consult the environment.** OpenSSH resolves the home
+directory through the account database, not through `HOME`. Setting `HOME` to a
+mounted persistent directory therefore does not stop SSH writing its state —
+known-hosts records above all — to whatever the account database says, which in
+a container is an ephemeral path that vanishes. The consequence is that
+trust-on-first-use never accumulates: every session re-encounters every host as
+new. On a platform where the superuser's home contains a symbolic link to
+storage not present in the container, it also produces a dangling path.
 
-**Debian's account-management tool refuses to modify the active root account** when
-the build shell is root/PID 1 under Docker's legacy builder. The passwd home fields
-must therefore be rewritten by direct text edit.
+**Dropping privilege to a numeric identity requires a tool that does not consult
+the account database.** The conventional privilege-dropping utilities require an
+account *name*, which an arbitrary numeric identity need not have. A utility
+taking a numeric id, performing no login and no pluggable authentication, is
+required. Its absence is a distinct condition and must be reported as such —
+reporting "no key found" when a key is present and merely unusable sends
+debugging in the wrong direction.
 
-**Rootless Podman invents a passwd record for keep-ID users.** Its home must be
-explicitly templated so passwd-aware tools agree with the mounted home.
+**A file descriptor survives a privilege drop.** This is the mechanism by which
+a key readable only by the superuser can be handed to an agent running as an
+unprivileged identity without ever copying it to a path the sandbox could read.
 
-**Unattended Git cannot answer a first-contact host-key prompt.** Trust-on-first-use
-must accept and record an unseen key, or background syncing hangs before
-authenticating.
+**Per-host client configuration is not part of the agent.** Forwarding the agent
+socket conveys identities, not the host's client configuration. Per-host
+identity selection, user names, and ports from that configuration do not apply.
+The result is that some remotes work and others fail in the same session, which
+looks like an intermittent credential problem and is not.
 
-**Git 2.35+ treats a repository owned by another UID as unsafe.** Readability is not
-enough; the session must declare its exact mounts trusted. Creating that trust file
-also creates the agent's Git config — so keying the identity check off the file's
-existence permanently suppressed identity seeding on any machine that later gained a
-host Git config, producing "Author identity unknown" on every commit forever. The
-check must key off the identity values themselves.
+**First contact with an unknown host is an interactive prompt.** Under
+automation with suppressed output and a timeout, that prompt manifests as a
+stall followed by an apparent unreachable-remote error. Accepting new host keys
+automatically converts it into a recorded fact — but only if the record is
+persistent, which returns to the account-database problem above.
 
-**SELinux relabeling is unsafe for this workload.** It mutates labels on arbitrary
-host directories including the user's project, and still cannot cover the agent
-socket. Disabling label separation for the session is the supported tradeoff and
-leaves the rest of the sandbox intact.
+### 7.2 Container engines
 
-**Wayland accepts an absolute display value**, so the socket can be mounted at a fixed
-path without reproducing the host runtime directory inside the container.
+**The two dominant engines do not accept the same options.** At least one
+process-namespace option spelling is accepted by one and rejected by the other.
+Any option set must be validated against both, or selected per-engine.
 
-**X11 access is strictly broader than Wayland** — any client can observe input — so it
-is only a fallback.
+**An init process requires a private process namespace.** Requesting both a
+supervising init process and a shared host process namespace is contradictory
+and rejected. Where the host namespace is shared, the host's own init reaps
+orphaned processes, so the supervisor is unnecessary.
 
-**Codex's inner sandbox cannot create its namespaces inside the session container**,
-so it is disabled; the outer container is the intended boundary.
+**Rootless operation needs explicit identity mapping.** One engine maps
+container identities to host identities one-to-one; the other, run rootless,
+does not, and requires an explicit request to keep the invoking identity. When
+that request is made for an identity absent from the image's account database,
+the engine *invents* an account entry — and the invented entry's home directory
+is not the one the session actually uses, which recreates the SSH problem in
+7.1. The invented entry can be templated explicitly.
 
-**Codex accepts MCP bearer tokens only by environment-variable name**, which is why
-only the name reaches the engine's arguments. `-e NAME=value` would expose the secret
-through process inspection.
+**Automatic container removal is handled by the daemon, not the client.**
+Killing the client process does not remove the container, and does not stop it.
+An unattended task that is cancelled or times out therefore leaves a container
+running and, if it is a model invocation, continuing to consume budget. A
+container that must be reliably reclaimed needs a predictable name so it can be
+addressed after the client is gone. A predictable name is also a hazard: it can
+already be held by something unrelated, so ownership must be confirmed before
+any forced removal.
 
-**Codex can persist learned TOML tables immediately before a trailing comment.** If
-the managed close marker is that trailing comment, project-trust and per-tool
-approval tables land inside the managed area and would be destroyed on rewrite. They
-must be rescued, and the block placed before the first table so future tables stay
-outside it.
+**Mandatory access control blocks bind mounts by default.** On distributions
+with it enabled, a confined container cannot read host paths carrying the
+default home-directory label, so a session fails reading its own state. The
+documented relabeling options are the wrong instrument here: they rewrite labels
+on arbitrary host directories — including the user's project — and cannot cover
+a socket at all. Disabling label separation for the session is the supported way
+to mount arbitrary host paths, and does not weaken the namespace, identity,
+capability, or privilege-escalation controls.
 
-**Codex's non-interactive resume rejects non-Git working directories** unless its
-repository check is explicitly skipped — sessions may start in ordinary directories.
+**Rebuilding an image from floating upstream tags strands the previous layers.**
+Where the image includes large package installations, each rebuild leaves the
+superseded image untagged but present. On appliances with a fixed-size image
+store this exhausts the store within a few updates. The superseded image can
+only be reclaimed safely if nothing else still names it.
 
-**Both agents select which conversation to resume partly by its original working
-directory.** The handoff writer therefore needs that exact path to exist even though
-it must not see the project; an empty filesystem satisfies the lookup, and one engine
-also rejects a nonexistent working directory outright.
+**A container engine reachable from inside another container may have a
+completely different filesystem view.** In appliance environments that expose an
+engine socket to applications, the engine cannot see the calling application's
+own files, so every bind mount silently refers to something else or fails. This
+is not detectable from the engine's version or capabilities; it requires
+actually attempting a mount and verifying the content arrives.
 
-**Killing a container-engine client does not guarantee the container stops.** A
-timed-out or cancelled helper keeps running and spending tokens, so it needs a
-predictable name and a verified ownership label before force cleanup.
+**The legacy image builder runs the build shell as the superuser and as process
+1.** Account-modification utilities refuse to alter an account currently in use,
+so changing the account database during a build requires editing the database
+file directly rather than using the conventional tool.
 
-**Repeated interrupts outlive the foreground agent.** They strike cleanup in the gaps
-after the UI exits, which is why durable cleanup runs in a separate process group that
-ignores the interrupt signal while a distinct signal remains the deliberate escape.
+**Working directories must exist.** At least one engine refuses to start a
+container whose requested working directory does not exist inside it. Where the
+working directory must match a path for reasons unrelated to its contents — see
+7.4 — an empty in-memory filesystem mounted at that path satisfies the
+requirement without exposing anything.
 
-**A smaller model that answers correctly standalone can still fail or drift out of a
-strict output format when resuming a long transcript.** Pinning one was tried and
-removed; the fallback run cost more than it saved. The lever that works is low
-reasoning effort on the agent's own default model.
+**A read-only mount option and an actually-rejected write can disagree.**
+Verifying that a mount is read-only requires attempting a write, not inspecting
+the mount's recorded options.
 
-**A Git rebase detaches `HEAD`, making the usual upstream expression unavailable.**
-Recovery detection must precede the upstream check, or it is skipped in exactly the
-broken state it exists for.
+### 7.3 Version control
 
-**An empty remote has no upstream branch**, so initial registration must distinguish
-a new remote from an offline or damaged one.
+**Repositories owned by a different account are refused outright.** Since a
+version 2.35 security change, operating on a repository whose owner differs from
+the current account fails every command with an ownership error rather than a
+permission error. Wherever the host account and the session identity differ —
+the normal case on appliance platforms — this affects every repository the
+session can see, and reads as repository corruption rather than a permissions
+issue. Directories must be declared trusted explicitly.
 
-**Aborting a rebase started with autostash restores pre-existing tracked edits.**
-Cleanup must not reset afterwards merely to get a clean-looking tree, or it destroys
-the only copy of those edits.
+**A rebase detaches the head, so upstream-relative references stop resolving.**
+Any guard that tests for an upstream before testing for an interrupted operation
+will be skipped in exactly the state it exists to catch. This produced a
+reproducible cascade in which a conflict left the working copy mid-rebase, the
+recovery check was bypassed on the next run, a strict validator then parsed
+conflict markers as data, and the program refused to start at all until a human
+resolved a rebase by hand.
 
-**Whole-file synchronized registries conflict under ordinary independent edits.** Two
-machines adding different entries still collide, which is why conflicts are expected
-rather than exceptional and the response is to back out rather than merge.
+**Aborting a rebase started with automatic stashing restores pre-existing
+uncommitted edits.** Those edits can be the only surviving copy of work. A "make
+the tree look clean" step after aborting therefore destroys data; verifying that
+the abort actually cleared the operation is the correct check.
 
-**Exact-key validation of synced state turns one machine's upgrade into a caravan-wide
-outage.** Validating only what is read, and ignoring unknown fields, is a hard
-requirement.
+**Wholesale rewriting of a shared file makes unrelated edits conflict.** Where
+every participant rewrites a registry file entirely, two participants changing
+*different* entries produce adjacent edits that conflict textually. This is the
+ordinary case, not an exception, for any format regenerated rather than patched.
 
-**Raw branch URLs on the content host are cached for roughly five minutes.** Resolving
-to a commit and downloading by immutable SHA is the only way to be sure.
+**Exact-schema validation of shared state is a fleet-wide outage mechanism.** A
+validator requiring an exact set of keys rejects anything a newer version
+elsewhere writes, turning one machine's upgrade into every other machine failing
+every command. Validating only the fields actually read, and ignoring unknown
+ones, is the difference between a rolling upgrade and a flag day.
 
-**Replacing a running Bash script can make Bash resume at an old byte offset inside
-new content.** Bash reads incrementally and seeks between top-level commands. Two
-consequences: the program's final line must be a single line that invokes its entry
-point and exits, so no later offset exists; and replacement must be a same-filesystem
-rename, because a cross-device move copies into the existing inode. That is the normal
-layout where the temporary directory is a RAM disk and the program lives on array
-storage.
+**A freshly-cloned empty repository has no upstream** until the first push
+establishes one, so upstream-relative operations must tolerate its absence
+rather than treating it as an error.
 
-**A running shell does not acquire logic from the script that replaces it.** The newly
-installed command must perform the image rebuild, or old in-memory behavior builds an
-environment inconsistent with the downloaded program.
+**Commits must work on a machine where version control was never configured.**
+Absent an identity, commits fail. A repository-local identity supplies one
+without overriding a user's global configuration where they have it.
 
-**Unraid's root filesystem and root home are RAM-backed**, and its boot script starts
-the web UI. Replacements must be syntax-checked, staged on flash, installed
-atomically, and backed up, because a partial or malformed write can require repairing
-the flash drive from another computer.
+**Creating a configuration file as a side effect breaks later "does the file
+exist" tests.** Where one operation writes a configuration file for its own
+purposes, a later feature guarded by the file's absence never runs again.
+Observed consequence: a machine whose first session predated having a
+version-control identity failed every in-session commit permanently and
+silently. Guards must key on the specific fact they need, not on a file's
+existence.
 
-**Unraid commonly stores container layers in a fixed-size virtual disk.** Rebuilding
-floating packages strands roughly gigabytes of old layers, so a superseded untagged
-image is reclaimed — but only when no other tag still names it.
+**Blob hashing identifies a file's content independently of history.** This
+allows comparing a locally-installed script against a published one without
+knowing which commit the local copy came from — which matters because
+hand-installed copies have no recorded provenance.
 
-**Agent version information lives inside the image**, so asking costs a container
-start. Caching it at build time is why every session can publish it for free.
+**Version control does not carry file permissions.** Only the execute bit
+survives; ownership and access mode do not. A file created with restrictive
+permissions on one machine arrives on every other machine at whatever that
+machine's default mask produces. Any confidentiality that depends on a file's
+mode must therefore be re-established wherever the file lands, not once where it
+was written.
 
-**Filename order is the durable handoff chronology.** A truncated header must not make
-a newer file immortal or invisible; the timestamp spelling sorts lexically after
-replacing filename-invalid colons.
+**A bare repository on a network filesystem is a legitimate remote.** Users
+without a hosted service will point shared storage at an NFS path, where there
+is no interface to click "create repository" in.
 
-**Bash treats tab as IFS whitespace.** A record emitted as `<value>\t<path>` with an
-empty first field parses as one field, silently shifting values — which caused undated
-handoffs to be skipped by ranking, never counted toward retention, and never pruned,
-so the directory grew unbounded.
+### 7.4 The agent tools driven
 
-**Negating a command exempts it from errexit.** A negative assertion written that way
-can never fail; this invalidated a large number of "must fail" checks at once.
+**Conversation resumption is keyed partly on the original working directory.**
+To resume a specific conversation unattended, the working directory must match
+the one the conversation ran in — but the *contents* of that directory are
+irrelevant to the lookup. This is what makes it possible to summarize a
+conversation about a project without granting access to the project.
 
-**A loop whose final test is false becomes the function's return status**, and under
-pipefail that propagates into an enclosing command substitution. Functions whose
-"found nothing" answer is normal must return success explicitly.
+**Non-interactive execution enforces constraints interactive execution does
+not.** One tool's non-interactive mode fails outright outside a version-
+controlled directory, while its interactive mode remembers a trust decision and
+proceeds. An unattended invocation therefore needs an explicit opt-out the
+interactive one never required. This failure was silent for an extended period
+because the unattended invocation's error output was discarded — the diagnostic
+lesson being that an unattended subprocess's error stream must be captured and
+surfaced, or its failures become indistinguishable from each other.
 
-**A fatal exit inside a command substitution terminates the substitution before any
-fallback outside it can run.** Placing the fallback wrong turns graceful degradation
-into a fatal abort — this made a reporting command print one line and exit non-zero on
-a host with no container engine.
+**The tools' own inner sandboxes cannot nest.** One tool sandboxes itself using
+kernel namespace creation, which is unavailable inside an already-isolated
+environment. Where the outer environment *is* the sandbox, the inner one must be
+disabled or the tool cannot run at all.
 
-**Existence tests are false for dangling symlinks**, so treating only existence as
-"present" made a redirect follow a missing target and abort.
+**Self-update inside a disposable environment is pure waste.** The tools check
+for and apply their own updates by default. In a container discarded at exit the
+update either fails or evaporates, while costing startup latency every session.
 
-**Directory-printing find extensions are not portable**, so ownership repair must not
-depend on them.
+**Clipboard access is implemented differently by each tool.** One shells out to
+external clipboard utilities, which must therefore be present in the image; the
+other speaks the display protocols directly. Both need a path to the host
+compositor, because that is the only place the clipboard exists — a snapshot
+taken at launch is useless, since pasting happens mid-session.
 
-**Rootless Podman can hide ancestor PID values even inside a private PID namespace**,
-so namespace privacy cannot be detected by PID count alone; the identity of PID 1 must
-be consulted too.
+**Instruction files are read from the tools' own home directories** and consumed
+in full at every session start. This makes them a genuine interface, and makes
+their size a cost paid on every launch: adding to them makes everything already
+in them work less well. Corrections are preferable to additions.
 
-**Skill discovery is an agent-startup behavior.** A skill written mid-session is
-durable immediately but may not enter the running agent's index; a fresh session is
-the compatibility boundary.
+**Those instruction files must use absolute paths.** A session running as the
+superuser resolves `~` to the superuser's home, not to the agent home the
+program actually mounted, and an agent told to read a tilde path will look in
+the wrong place.
 
-**A diagnostic with no peer reports has not demonstrated agreement.** Missing evidence
-must be distinguished from matching evidence, because prior behavior reported "no
-drift" from an empty comparison set.
+**Extension discovery happens at startup only.** An extension installed during a
+session is durable immediately but not discoverable until the next session.
+Users must be told this or they will conclude the installation failed.
 
-**A read-only host bind does not make special files inert.** A readable socket or
-device exposed under the mount may still permit side effects.
+**One tool materializes a version-specific bundled-extension tree inside the
+same directory it discovers user extensions in.** That tree belongs to the
+installed version of the tool. Treating it as user content causes different
+versions on different machines to repeatedly overwrite each other's bundled
+extensions.
+
+**Extension metadata files written by third-party installers are not this
+program's to interpret.** Their schemas are owned elsewhere and change without
+notice. They can be carried and validated as well-formed, but rewriting them on
+the basis of a guessed schema corrupts installer state.
+
+**One tool cannot accept a bearer credential inline** in its configuration; it
+accepts only the name of an environment variable to read one from. This forces
+the credential through the process environment, which in turn constrains how the
+container is launched — see 7.7.
+
+**A model given a formatting contract will sometimes drift out of it,**
+especially when resuming a long transcript. A smaller or faster model increases
+that probability, and every drift costs a full retry on the default model —
+which measured *more* wall-clock than the smaller model saved. The useful lever
+is reasoning effort on the default model, not model substitution.
+
+**A model correctly reporting "there is nothing to record" is a valid result,
+not a failure,** and must be distinguished from a failed invocation. Partial
+output from a failed invocation, by contrast, is not authoritative and must not
+be accepted as a result.
+
+**Asking a model to emit exact literal delimiters is fragile.** Where structured
+output is separated by literal marker lines, anything the model gets slightly
+wrong is silently unattributable, and two sections that resolve to the same
+destination will overwrite each other unless explicitly merged.
+
+### 7.5 Operating system and desktop
+
+**The Wayland display protocol accepts an absolute socket path** in its display
+variable, which removes any need to reproduce the host's runtime directory
+structure inside the container. The X11 fallback requires the socket directory
+plus the display variable and, where present, the authority file. X11 access is
+strictly broader than Wayland — any client can observe input — so where both
+exist the narrower one is the correct choice.
+
+**Forwarding a compositor socket grants more than clipboard access on some
+compositors.** Screen capture and virtual input are gated behind portals on the
+major desktop environments but are directly available on others. This is a real
+widening of what a session can do, not a formality.
+
+**A platform whose root filesystem is rebuilt at boot loses everything not on
+persistent storage** — installed commands, path entries, and the superuser's SSH
+state including host-key records. The boot-time restoration script on such
+platforms is also what starts the appliance's own management interface, so a
+partially-written or non-parsing copy of it costs the user a physical trip to
+the machine with removable media. Any modification to it must be a rename of a
+fully-written file within the same filesystem, must be syntax-checked before
+installation, and must keep the last known-good copy. The removable storage
+holding it is typically unencrypted and is a single point of failure for the
+entire appliance configuration, independently of this program.
+
+**On such platforms the program commonly runs as the superuser while sessions
+run as an unprivileged identity.** Project files then belong to the superuser
+and are readable but not writable from the session, and version control refuses
+them entirely (7.3). An agent encountering a permission error there will reach
+for privilege escalation or permission changes, neither of which can work from
+inside; it must be told the cause is host ownership and that only the user can
+fix it.
+
+**Shells cache the location of commands they have already resolved.** A newly
+created command on the path is not found by an already-running shell until its
+cache is cleared or a new shell is started, which reads as the installation
+having failed.
+
+**Terminal capability must be determined per output stream.** Whether output is
+a terminal is independent for standard output and standard error, and they are
+routinely redirected separately. A single global decision produces escape codes
+in a captured log or strips them from an interactive display.
+
+### 7.6 Network, distribution, and self-replacement
+
+**Raw file access on the published-source host sits behind a cache of roughly
+five minutes** and will serve a stale copy. Resolving a branch to a commit
+through the API and fetching by commit identifier bypasses this; fetching by
+branch name does not.
+
+**A cross-device move is a copy into the existing destination inode, not a
+rename.** This matters catastrophically for a program that replaces itself: the
+interpreter reads a script incrementally and seeks back into the file between
+top-level commands. Copying a longer replacement into the running file's inode
+causes execution to resume at a stale byte offset inside the new content, so an
+arbitrary fragment of the new program executes. The staging location must be on
+the same filesystem as the target — and the conventional temporary directory is
+*not* on the same filesystem on the appliance platform, where it is memory-backed
+while the program lives on storage.
+
+**The same interpreter behavior means the program must have nothing after its
+final top-level command** — there must be no later offset for it to resume into.
+
+**A downloaded replacement must be syntax-checked before installation.** A
+truncated download otherwise replaces a working program with an unparseable one.
+
+### 7.7 Credentials and process visibility
+
+**Passing a value as an environment assignment on a container engine's command
+line discloses it in the host process list**, readable by any local user.
+Passing only the *name* of an already-exported variable does not. Where a
+wrapped tool requires a credential to arrive through the environment (7.4), this
+is the only way to satisfy it without disclosure.
+
+**Secrets that reach shared storage persist in its history** even after removal.
+Rotation at the source is the only real remediation, and users must be told
+that rather than being left to believe deletion suffices.
+
+**A warning about a suspected secret must never quote the suspected value**, or
+the warning becomes another place the secret is recorded.
+
+### 7.8 Interaction and signals
+
+**A held interrupt keystroke continues to deliver signals after the foreground
+process is gone.** Repeated interrupts used to exit an interactive tool spill
+over into whatever runs next — which is exactly the cleanup and context-capture
+work that must not be lost. Protecting that work requires running it in its own
+process group, because programs like container clients and version control
+install their own signal handlers regardless of what the parent does.
+
+**Clearing a signal handler before restoring the previous one leaves a window at
+the default disposition.** A signal arriving in that window terminates the
+process. Handlers must be restored directly rather than cleared first.
+
+**A caught signal handler still lets child processes receive the signal, while
+an ignored one does not.** This distinction is what allows an interactive child
+to respond to interrupts normally while the parent is protected.
+
+**A distinct second key is needed for "deliberately skip this optional step",**
+because the obvious one is already overloaded with "stop what is happening" and
+is being delivered in bursts by the user's own muscle memory.
+
+**Prompt defaults are part of the safety design.** A destructive question must
+default to refusal so that a reflexive keystroke declines it; a routine question
+should default to acceptance so it is not a toll. A question about granting
+elevated inspection deserves a third option — permanently stop asking — because
+otherwise the user's only way to silence it is to accept it.
+
+### 7.9 Language-specific artifacts
+
+*These exist only because of the implementation language and would not recur in
+a different one. They are recorded so they are not mistaken for facts about the
+world.*
+
+- **The shell counts tab as whitespace for field splitting.** Reading
+  tab-delimited records with tab as the separator therefore mis-parses any record
+  with an empty leading field, silently shifting every column. This produced a
+  retention bound that stopped working entirely for records missing an optional
+  field.
+- **Negating a command's status exempts it from error-on-failure mode.** Every
+  negative test assertion written that way runs, discards its result, and passes
+  unconditionally. This affected a third of one test suite's negative assertions
+  and concealed two tests asserting directly contradictory requirements, both
+  "passing".
+- **A function's return status is whatever its last command returned.** A loop
+  whose final iteration's test fails returns failure, which under strict mode
+  terminates a caller that was merely asking a question with a legitimately empty
+  answer.
+- **A fatal error inside command substitution exits the subshell, not the
+  program**, so the assignment merely returns non-zero — which strict mode then
+  turns into a program exit at a completely different place than intended. This
+  made read-only reporting commands die on machines that simply lacked an
+  optional dependency.
+- **Reading input inside a loop whose input is redirected reads from the
+  redirection, not the terminal.** A prompt placed inside an iteration over a data
+  stream silently consumes the next record of that stream as the user's answer.
+- **Reading input at end-of-input returns failure**, which under strict mode
+  terminates the program rather than yielding an empty answer.
+- **Expanding an empty array under strict mode is an error on older interpreter
+  versions**, requiring a guarded expansion idiom that is easy to apply
+  inconsistently — and was.
+- **There is no structured data type**, so records are strings parsed with text
+  tools, and every delimiter choice is a latent injection or mis-parse.
+- **Configuration implemented as sourced code executes**, so a configuration file
+  is an arbitrary-code channel rather than data.
+- **Tracing execution is unusable as a debugging technique** where tests capture
+  a function's combined output and assert it is empty, because the trace lands in
+  the captured output.
+- **Concatenating sources into a single deliverable means the deliverable and the
+  sources can drift**, requiring mechanical enforcement that they match and
+  requiring test tooling to be explicit about which of the two it exercises.
 
 ---
 
-## 6. Known weaknesses, ambiguities, and open questions
-
-Ordered roughly by severity. Every claim below was verified against the current
-behavior.
-
-### Contradicted promises
-
-**6.1 — No-sync behavior is contradictory.** Setup states that handoffs, MCP, and
-skills "stay on this machine" when no Sync Repo is configured. In fact sessions mount
-no local skill library, MCP management refuses to run, and handoff generation is
-skipped entirely. **Open question:** should these work locally, or should the message
-say they are unavailable?
-
-**6.2 — MCP startup violates the fail-open guarantee.** A session can detect malformed
-synchronized state, announce that syncing is disabled for the run, and then validate
-the MCP registry again while writing the agent's configuration — where a malformed
-registry is fatal. A bad registry therefore **kills the session after Satchel promised
-to continue**. Conversely, a valid registry is still consumed after some *other*
-registry caused degradation. The authority of the degraded-state boundary is ambiguous
-and this is the one live violation of the project's central invariant.
-
-**6.3 — A whole setting scope is unreachable.** The catalog defines machine-local
-versus caravan-wide, and the setter implements both, including a synced layer read on
-every run. **No setting is actually declared caravan-wide.** So `--local` is a no-op
-for every key, nothing writes the synced layer through a supported path, and both the
-help text and README claim caravan-wide behavior that never occurs.
-
-**6.4 — Synchronized settings are executable shell code.** Both the synced and local
-settings layers are *sourced* before strict validation of synchronized state. A syntax
-error, a Git conflict marker, or a malicious edit in the Sync Repo can stop launch or
-execute host commands — directly contradicting "no Sync Repo condition may block a
-session."
-
-**6.5 — Two behavior-changing environment variables are undocumented.** Any non-empty
-value — including the string `0` — enables a fully privileged Host Session via one, and
-suppresses handoffs via the other. Neither appears in help, README, or the settings
-catalog. Their support status and truth-value semantics are **open questions**.
-
-**6.6 — A nominally sandboxed session can be configured to run as root.** A zero
-session UID is accepted, and is even *recommended in a warning message* as a workaround
-for root-owned worktrees — contradicting the claim that normal agents run unprivileged.
-**Open question:** is UID 0 a supported safety exception?
-
-**6.7 — Misleading advice when refusing to start in the state directory.** The
-interactive refusal suggests re-running with the override flag, which deliberately does
-not bypass that particular refusal. The non-interactive path gets this right.
-
-### Verified bugs
-
-**6.8 — Unraid key persistence and restoration disagree.** Persistence selects the
-first of the three standard key types found, but the boot block restores only the
-Ed25519 pattern. A machine with only an ECDSA or RSA key reports a successful flash
-backup that will **not** be restored at boot. Persistence also assumes the matching
-public key file already exists.
-
-**6.9 — Non-strict retirement can leave the clone mid-rebase.** That path pulls with
-rebase and, on conflict, exits fatally without invoking recovery — contradicting the
-project-wide invariant that the clone is never left mid-operation.
-
-**6.10 — The ignored-entry invariant is not enforced.** The documented schema says
-ignored entries carry no Project, but validation accepts any ignored entry regardless of
-a stale Project field.
-
-**6.11 — "Clear a setting" does not clear it.** Passing an empty value writes an
-explicit empty assignment and the source continues to report as local or synced rather
-than reverting to the default. **Open question:** is preserving empty overrides the
-compatible behavior, or is the documented clearing behavior?
-
-**6.12 — A custom session UID is not honored on a non-root host.** UID switching and
-agent probing happen only when the invoking process is root. A non-root user who
-configures a different session UID gets an agent reported usable for the *host* UID even
-though it may reject the container UID.
-
-**6.13 — Removing a nonexistent MCP server reports success.** A syntactically valid name
-is accepted even when nothing was removed, so scripts cannot distinguish deletion from
-absence.
-
-**6.14 — `auth: "none"` does not suppress a stale token.** Re-adding a server without
-authentication does not remove a previously stored token, and materialization attaches
-any token it finds without consulting the current auth mode.
-
-**6.15 — Installation overwrites an unrelated existing command.** Redirect shims have
-ownership checks; the main command destination is replaced unconditionally.
-
-**6.16 — Diagnostics have side effects.** They refresh the local cached version file,
-contact the update host and every registered endpoint, and do not run every
-synchronized-state validator before reporting success.
-
-**6.17 — Engine detection is asymmetric.** Docker must answer a health query to be
-selected; mere presence of the Podman command is enough. Installation checks only
-command presence for either.
-
-### Security and trust boundaries
-
-**6.18 — The persistent agent home is not a secret-isolation boundary.** A session
-receives the agent's entire durable home plus network access — transcripts, OAuth state,
-native MCP configuration, and any other credentials stored there — so it can transmit
-those materials even though project and host mounts are restricted. Whether this is an
-accepted trust assumption is never stated.
-
-**6.19 — Host Git configuration is imported wholesale into a new agent home.** It may
-contain absolute host paths, conditional includes, credential helpers, or signing
-programs that do not exist or are inappropriate inside the session. The resulting
-behavior is undefined.
-
-**6.20 — The baseline's enforced access exceeds its stated boundary.** It can write the
-machine's entire synchronized area, not only approved knowledge files, and retains
-network access, live clipboard access, persistent agent credentials, and native MCP
-configuration. The prompt text is the only control preventing unrelated edits or
-disclosure.
-
-**6.21 — Baseline safety decisions are process-local and non-transactional.** A detected
-secret or invalid marker blocks syncing only in the current process. The changed files
-remain in the worktree, and a later session or explicit sync can commit them **without
-repeating the secret scan**. A failed, interrupted, or declined baseline likewise leaves
-partial edits in place rather than restoring its starting snapshot.
-
-**6.22 — The baseline secret scan is heuristic.** It scans only newly added lines, so a
-pre-existing secret is never caught; it can miss secrets not matching its patterns and
-can block harmless long hashes, encoded data, or prose.
-
-**6.23 — Token values remain visible to same-user process inspection.** Keeping values
-out of engine arguments closes one channel, but an inherited environment is not a general
-secret store.
-
-**6.24 — Codex token variable names can collide.** Server names differing only by case,
-or by hyphen versus underscore, map to the same variable — so one server can receive
-another's token.
-
-**6.25 — Install and update trust remote content without signature or pinned digest.**
-Syntax validation catches corruption that breaks parsing, but authenticates nothing
-beyond the transport.
-
-**6.26 — The image is unreproducible.** The base tag and both agent packages float, so
-rebuilds at different times change behavior with no source change. Drift is only
-reported after another session publishes it.
-
-### Correctness and robustness
-
-**6.27 — Handoff freshness is described two different ways.** The generated instructions
-tell the agent to find the latest handoff by the date in its first line, while actual
-selection and retention use filenames precisely so truncated headers stay valid. Which is
-authoritative must be settled.
-
-**6.28 — Handoff chronology depends on host locale.** Filename ordering is intended as
-lexical UTC ordering, but the sorting inherits the process locale. Whether every
-supported locale preserves the expected order is not established. Relatedly, latest-file
-selection relies on glob expansion order in one place and an explicit sort in another;
-today they agree only incidentally.
-
-**6.29 — Handoff filenames can collide.** Two handoffs for the same machine and scope in
-the same UTC second overwrite the same path.
-
-**6.30 — Handoff format enforcement is weaker than the prompt.** Only the presence of the
-five headings as complete lines is checked — not order, uniqueness, the stated line
-limit, or well-formed content per scope. Merging two chunks for one scope therefore
-produces a file with the headings twice, which still passes.
-
-**6.31 — A changed transcript is only a proxy for meaningful work.** Generation can be
-skipped after useful work that did not update the expected transcript, or attempted after
-a change containing nothing worth handing off.
-
-**6.32 — Candidate classification is delegated to model output.** A repository prompts
-only if the resumed agent emits the exact delimiter, so substantive work can be missed and
-casual work can prompt, depending on model behavior.
-
-**6.33 — The pre-launch writability test is an approximation.** It considers ownership and
-basic mode bits at the mount root only — no ACLs, immutable attributes, supplementary
-groups, or unwritable descendants — so a warning can be missing or misleading.
-
-**6.34 — Not every network operation is timeout-bounded.** Startup syncing is bounded, but
-explicit sync, some initialization and registration work, and non-strict retirement can
-wait indefinitely on Git, SSH, DNS, or credential prompts.
-
-**6.35 — Automatic syncing commits every change in the clone.** A session-end sync stages
-and publishes unrelated manual edits that happened to be present, not only state the
-session generated.
-
-**6.36 — Update has no rollback transaction.** The script is replaced before the image is
-built. If the build fails the new script remains active while the recorded commit
-deliberately stays old.
-
-**6.37 — Continuing after a failed clone leaves ambiguous configuration.** The run behaves
-as unsynchronized, but the URL remains configured, so a later launch sees a configured URL
-with no usable clone and follows a different failure path. This is also the source of the
-two different definitions of "already initialized" used by the installer and the program.
-
-**6.38 — Uninstall can leave an inaccessible image behind.** Program and state removal can
-complete even when image deletion fails, so the command needed to inspect or retry may
-already be gone.
-
-**6.39 — Claude MCP materialization replaces the entire native server object.** Entries
-added outside Satchel are silently removed at the next session, and malformed Claude JSON
-has no tailored preservation path comparable to the Codex marker handling.
-
-**6.40 — Codex configuration preservation is heuristic, not a TOML merge.** It recognizes
-table headers textually, can reorder rescued tables, and may not survive future Codex
-write patterns.
-
-**6.41 — MCP probing is reachability-only.** It sends no token, performs no protocol
-handshake, and treats every non-404 response — including authorization and server errors —
-as healthy. An unreachable endpoint is nonetheless a hard diagnostic failure, unlike every
-other network condition in the program, which is a warning.
-
-**6.42 — A missing bearer token can abort a non-interactive session.** The interactive path
-can ask whether to store or skip, but an unanswered or failed prompt can propagate as a
-launch failure instead of simply omitting that server.
-
-**6.43 — Skill validation proves package boundaries, not semantics.** It does not validate
-frontmatter, instructions, declared references, executable safety, or the existence of
-every file the skill names.
-
-**6.44 — Skill repair is asymmetric.** At session start malformed entries are quarantined
-but no previously valid version is restored; at session end restoration does happen. A
-skill quarantined at startup therefore disappears from the session about to use it.
-**Open question:** deliberate, to avoid touching Git at startup, or an oversight?
-
-**6.45 — The reserved runtime skill area has an unclear trust boundary.** It is
-colocated with the shared library and hidden from Git and user reports, but may still be
-visible to another agent receiving the library mount.
-
-**6.46 — Runtime drift data is incomplete and can be stale.** The published report contains
-source-commit and engine fields that diagnostics never compare, and reports refresh only
-after a session — so a machine can appear current after an update until another session
-publishes. The commit field is empty for any hand-installed copy.
-
-### Interface and validation gaps
-
-**6.47 — Satchel-owned flag names cannot be passed through to the agent.** There is no
-end-of-options escape, so an existing or future agent option named `--host`,
-`--unsafe-home`, or `--with` is inaccessible — and would be silently swallowed, not
-reported.
-
-**6.48 — Several parsers accept unintended input.** Linking can create an arbitrary command
-name that later invokes an unknown Satchel command; some registry, settings,
-initialization, and retirement forms ignore extra arguments or unrecognized
-optional-position values instead of rejecting them. The authentication override on server
-registration is only honored as a third positional argument, and only meaningfully when
-the first two were supplied.
-
-**6.49 — Setting values lack semantic validation.** UID and GID need not be numeric,
-Boolean settings disable only on exact `0`, and the engine value can name any executable.
-Failures surface later and confusingly.
-
-**6.50 — Origin validation is incomplete.** A registry key need only be non-empty and
-stable under canonicalization; it need not resemble a network origin. IPv6 authorities,
-uppercase `.GIT`, percent-encoding, path normalization, and forge URLs with ports have
-ambiguous or inconsistent identities.
-
-**6.51 — Remote migration is unsupported.** Setup requires textual equality with the
-existing origin, so equivalent spellings are refused and moving a caravan between remotes
-has no defined workflow.
-
-**6.52 — Local/no-origin Project linking rests only on user assertion.** There is no
-portable identity proof that two local repositories linked to one Project ID are the same
-repository.
-
-**6.53 — Host Session Project visibility uses the path cache without scanning.** Stale
-cached paths can appear visible or affect attribution until a normal scoped discovery
-refreshes them.
-
-**6.54 — Host Sessions validate extra-mount arguments they then ignore.** An invalid path
-blocks launch even though the whole host is already exposed and no additional mount would
-be created.
-
-**6.55 — Generated identifiers have no length limit.** Very long origin-derived or
-user-supplied identifiers can approach filesystem component limits and break path creation
-after passing validation.
-
-**6.56 — Bare-path mounting contradicts the Host Session instructions.** The working
-directory is mounted at its real absolute path even in Host Sessions, so a Host Session
-launched from a system directory makes that one bare path refer to the real host while the
-generated instructions call bare system paths disposable.
-
-### Structural
-
-**6.57 — Machine-knowledge content rules are advisory.** The notes limit is only warned
-about, and the distinctions between current fact, history, inventory, and guide are prompt
-instructions rather than validated contracts.
-
-**6.58 — The baseline exit status becomes the command's exit status.** A caller cannot
-distinguish "the baseline did not complete" from "the session failed", and the two mean
-very different things.
-
-**6.59 — Whole-file registry conflicts remain a routine cost.** The current policy
-preserves data and avoids guessing but requires manual reconciliation even when machines
-changed unrelated logical entries. A one-file-per-entry layout would make adds and removes
-structurally conflict-free and is simpler than merging; it was not adopted because it needs
-a simultaneous migration across every machine.
-
-**6.60 — Compatibility is intentionally hostile to one older format.** The presence of the
-obsolete per-Project metadata file is a hard error with no automatic migration. Version-1
-baseline markers get a read fallback; no other historical format does.
-
-**6.61 — The host-only plugin report is informational and incomplete.** Plugins are neither
-mounted nor synced, and the report depends on one host directory shape. It is the one item
-in the report that describes something no session can use.
-
-**6.62 — There is no release channel besides the default branch.** Updates change all
-machines independently, with no stable-version selection, downgrade command, release
-manifest, or declared schema version for synchronized state.
+## 8. Why it went wrong
+
+Defects were assessed by one question: would this have happened in a different
+language with a different architecture? Those that would not are artifacts of
+choices being discarded and are not reported. What remains clusters into a small
+number of patterns.
+
+### Pattern A — A human is assumed present on paths reachable unattended
+
+Acquisition of missing information — credentials, confirmations, choices — was
+implemented inline in code paths that also run without a terminal. Some such
+points test for an interactive terminal first; others do not, and the
+inconsistency is invisible from the call site.
+
+*Evidence.* Verified by execution: starting a session on a machine that has a
+registered tool-server requiring a credential it does not hold aborts the entire
+launch when no terminal is attached — directly violating the invariant that
+nothing about shared state may prevent a session from starting. Verified
+separately, and worse: when two such servers are registered, the prompt for the
+first consumes the second server's record as its answer, so a fabricated
+credential is stored, written into the agent's live configuration as a bearer
+header, *and propagated to every other machine*, while the second server is
+silently dropped from the configuration entirely. Elsewhere in the same program
+the opposite discipline is applied deliberately — an unattended session
+explicitly declines to make a durable global decision about an unknown
+repository and preserves the work instead — which is what makes this a
+consistency failure rather than an oversight.
+
+*Why it recurs.* The specific mechanism is language-dependent; the shape is not.
+Any design that treats "obtain something missing" as a step inside a
+data-processing pass, rather than as a distinct concern with an explicit answer
+for the unattended case, reproduces this. The question — "what does this program
+do when it needs an answer nobody is there to give?" — has to be answered once,
+globally, not per call site.
+
+### Pattern B — A global guarantee enforced per path
+
+The program states properties that are supposed to hold everywhere, then
+implements them as a check repeated at each site where someone remembered it.
+Every site that was missed is a silent hole in a documented guarantee.
+
+*Evidence.* The strongest case is the central invariant itself. "No condition of
+the shared store may prevent an agent from starting" is implemented as a soft
+validation on the session path — and then a *strict* validator, with no guard,
+runs again moments later while translating the tool-server registry into the
+agent's configuration. Verified by execution: with a malformed registry, the
+soft check correctly degrades and the strict one immediately terminates the
+program. This is precisely the lockout the invariant exists to prevent,
+surviving on one unguarded path.
+
+The same shape recurs across unrelated features. Verified by execution: the
+machine's root directory can be mounted into a session that still describes
+itself as sandboxed, via the primary-mount path's override, while the
+additional-mount path refuses the identical request unconditionally and has no
+override at all — the documentation asserts the two are symmetric. Whether the
+program refuses to mount its own private state depends on whether a terminal is
+attached: interactively the same condition is offered an upgrade to the
+unisolated mode, which mounts it. The environment contract published for
+third-party installers is documented as present in "every session" and is set by
+one of the three kinds of agent run. "Has this machine an SSH key" has three
+different definitions in three subsystems, and the boot-time restoration written
+for one of them restores only one key type — so a machine whose only key is a
+different standard type is reported healthy by the diagnostic while its shared
+storage breaks at every reboot. Historically the platform-specific boot content
+existed in three copies — installer, program, documentation — and had already
+drifted by one line.
+
+*Why it recurs.* Not about language. It follows from a capability count high
+enough that many features plausibly need "the same thing", built at different
+times by different reasoning. Nothing detects the divergence because the
+guarantee has no single representation to diverge *from*.
+
+### Pattern C — Checks that report success from an absence of evidence
+
+Verification steps concluded "fine" when they had in fact examined nothing.
+
+*Evidence.* A cross-machine consistency check reported agreement while zero
+machines had published anything to compare — its comparison loop never executed,
+so its difference counter stayed at zero and was read as concurrence. A readiness
+probe for outbound authentication was performed as the wrong identity, which the
+underlying service *does* serve, so a channel no session process could reach was
+reported as working. A retention bound counted only records it could parse, so
+unparseable records were never counted and never removed; the bound was measured
+holding more than its limit while reporting nothing to remove.
+
+*Why it recurs.* Wholly independent of language. It follows from encoding
+"nothing was found wrong" and "nothing was examined" in the same value —
+typically a zero counter or a boolean — which any implementation will do unless
+the distinction is made explicit in the result.
+
+### Pattern D — Guards keyed on a proxy rather than on the fact required
+
+Conditions tested something correlated with what mattered, and the correlation
+was later broken by an unrelated change.
+
+*Evidence.* A feature that copied a version-control identity was guarded by the
+absence of a configuration file; a different feature then began creating that
+file for its own reasons, so the identity was never copied again and every
+in-session commit on affected machines failed permanently and silently. A
+recovery guard was placed behind an upstream-existence test, but the very
+condition it recovered from detaches the head and makes upstream references stop
+resolving — so it was skipped in precisely the state it existed to catch, which
+is what turned a routine conflict into a machine unable to start an agent at all.
+A compatibility probe intended to recognize machines onboarded under an older
+scheme tests for the *presence of a file* and then stops, rather than for the
+presence of the marker it is looking for — so a machine carrying a valid old
+marker in the old location, plus an unmarked file in the new one, is reported as
+never onboarded, which is the exact case the probe was written to handle.
+
+*Why it recurs.* Language-independent. It arises whenever a condition is
+expressed in terms of an observable side effect rather than the underlying fact,
+and the coupling is invisible because the two features are unrelated in every way
+except that one happens to touch the other's proxy.
+
+### Pattern E — Identity and ownership assumed rather than established
+
+Operations assumed the identity performing them was the identity that would later
+need the result.
+
+*Evidence.* Files created by the program while running privileged were unusable
+by the unprivileged session moments later; a privileged session left state a
+subsequent unprivileged one could not modify; an authentication channel was
+established under one identity and consumed under another; version control
+refused every mounted repository because its owner differed from the session's
+identity. Each was found separately and fixed separately.
+
+*Why it recurs.* The problem domain genuinely spans identity boundaries — host
+account, session identity, container account, and remote identity are four
+different things, and the target environments map them differently. Any
+implementation faces this; what varies is whether the mapping is represented once
+explicitly or rediscovered at each site.
+
+### Pattern F — Cancellation and cleanup as an afterthought
+
+Termination paths were less well specified than success paths, and the work that
+must survive termination is precisely the work that captures state.
+
+*Evidence.* Repeated interrupts intended to exit the interactive tool killed the
+context capture that followed; restoring a signal handler by clearing it first
+left a window in which a held keystroke terminated cleanup; cancelling an
+unattended model invocation killed the client but left the container running and
+consuming budget, because removal is handled by the daemon and not the client; an
+interrupted self-replacement could leave a corrupted executable because the
+staging location was on a different filesystem than the target.
+
+*Why it recurs.* Independent of language. Cancellation is a cross-cutting concern
+that cannot be added per-operation, and its correctness is observable only under
+conditions inconvenient to reproduce — which is also why the original test for
+one of these could not fail even against completely unprotected code.
+
+### Pattern G — State whose scope does not match the lifetime of what it guards
+
+A fact was recorded somewhere narrower than the hazard it was recorded about, so
+the hazard outlived the record of it.
+
+*Evidence.* A refusal to publish machine knowledge — triggered either by a
+suspected secret in newly written content or by a failed structural check — is
+held in memory for the duration of the run, while the content it refused to
+publish stays exactly where it was written. The next run collects and publishes
+it with no warning and no re-check. The same shape appears when machine
+inspection fails partway: the check that declares failure looks at one artifact,
+while anything else the agent already wrote remains staged for the next run to
+collect. A credentials file is created with restrictive permissions on the
+machine that writes it, but the transport carries no permissions, so every other
+machine receives it at whatever its default mask produces — the protection
+exists only where it was applied.
+
+*Why it recurs.* Independent of language, and specific to this problem shape: the
+program's whole purpose is moving state between processes, machines, and points
+in time, so any decision recorded in process memory is recorded in the one place
+guaranteed not to travel with the thing it describes. Every such decision needs
+an explicit answer to "how long must this outlive the thing that made it", and
+the default answer — the current process — is almost always wrong here.
+
+### Census
+
+Across the implementation's own recorded history and three independent readings
+performed for this document, on the order of sixty distinct defects,
+contradictions, and dead mechanisms were identified. Roughly half are defects
+proper; the remainder are documentation that no longer describes behavior, and
+mechanisms that were built, wired, and never reached — a layered settings model
+whose shared tier nothing can write, a flag that changes nothing, fields written
+and validated but never read, a legacy format probe for a format nothing has
+produced in a long time. Those are not defects, but they are evidence for the
+same conclusion.
+
+Of the defects, most were found and fixed by the implementation itself, and its
+own commit record documents several as having been deliberately reproduced
+before being repaired. Six were verified by execution as still present during
+this analysis, including two that violate stated invariants outright: a
+non-interactive launch aborted by a missing credential, and a launch aborted by
+malformed shared state. Applying the filter, somewhat more than half of the
+defects survive as language- and architecture-independent; the remainder are
+quoting, expansion, strict-mode, and text-parsing artifacts that a language with
+real data types and explicit error handling would never have produced.
+
+The survivors do not concentrate in a subsystem. They concentrate at
+*boundaries*: between privileged and unprivileged identity, between interactive
+and unattended execution, between this program and the tools it drives, between
+one process and the next, and between the two container engines and the several
+platforms targeted. That distribution is the evidence behind section 1.1. A
+defect density concentrated in one area indicates a badly-built area; a defect
+density concentrated at seams indicates too many seams. With roughly seventy
+capabilities, nearly every one crossing at least one of those boundaries, the
+feature count did exceed what a single coherent implementation could hold — not
+because any individual capability was unreasonable, but because the number of
+boundary crossings grows with the product of features and environments, and this
+implementation was carrying both. The clearest single symptom is that the
+program's most emphatically stated guarantee — that bookkeeping can never block
+a session — is documented in its own decision record, enforced on the path that
+record examined, and still violated on two other paths that reach the same
+point.
 
 ---
 
-## 7. Collected open questions
+## Appendix — Internal formats (reference only)
 
-1. Should synchronized capabilities work locally without a Sync Repo, or should the
-   messaging say they are unavailable? (§6.1)
-2. Where exactly is the fail-open boundary? A malformed MCP registry currently kills a
-   session that was already told it would continue. (§6.2)
-3. Should caravan-wide settings exist? Today the scope is implemented but unused, and the
-   documentation describes behavior that never occurs. (§6.3)
-4. Should synchronized settings remain executable shell? (§6.4)
-5. Are the two undocumented environment variables supported API, and should they use
-   truth-value rather than non-empty semantics? (§6.5)
-6. Is a zero session UID a supported safety exception? (§6.6)
-7. Is preserving an empty setting override the compatible behavior, or is clearing? (§6.11)
-8. Which is authoritative for handoff freshness — the header date the instructions
-   describe, or the filename the implementation uses? (§6.27, §6.28)
-9. Is the start-of-session versus end-of-session asymmetry in skill repair intentional?
-   (§6.44)
-10. Should an unreachable MCP endpoint be a hard failure or a warning, given every other
-    network condition is a warning? (§6.41)
-11. Should the published container-engine field be compared, or dropped? (§6.46)
-12. Is exposing the baseline's exit status as the command's exit status intended? (§6.58)
-13. Are the Unraid path overrides and the self-path override public API, or test-only
-    seams? (§2.3)
-14. Is cross-agent visibility of the reserved runtime skill area intended? (§6.45)
+**This appendix is not a specification.** Everything in it was invented by the
+prior implementation for talking to itself. None of it is a contract, and a
+rewrite is under no obligation to reproduce any of it. It is recorded solely so a
+migration path from existing installations can be written if one is wanted, with
+an assessment of whether each format was actually a good idea.
+
+**Shared store layout.** A single version-controlled working copy carrying:
+per-machine directories (durable notes, a dated inventory, topic guides, a path
+cache, machine-scoped continuation records, a published runtime description);
+per-repository directories containing only continuation records; a repository
+registry at the root; a tool-server registry and a separate credentials file;
+global profile and preferences documents; and one shared extension tree.
+*Assessment:* tiering machine knowledge by lifetime — always-loaded, on-demand
+reference, on-demand procedure — was correct and worth carrying forward as a
+concept. The rest was reasonable, but the whole-file-rewrite pattern is what
+produced the conflict class in 7.3.
+
+**Repository registry.** A flat object keyed by credential-free canonical origin,
+each value carrying a status of `tracked` or `ignored` and, when tracked, a
+project identifier. *Assessment:* keying on normalized origin rather than on path
+or folder name was correct, and had to be arrived at by getting it wrong twice.
+The single-file-for-all-entries shape was not: one file per entry would have made
+the conflict class structurally impossible, and was identified as such but
+deferred because it required a simultaneous migration everywhere.
+
+**Machine path cache.** Per machine, an object mapping absolute checkout paths to
+project identifiers and nothing else. *Assessment:* correct — deliberately
+disposable, rebuildable, and carrying no identity of its own.
+
+**Continuation record format.** A markdown document preceded by a single comment
+line carrying project, machine, and timestamp, with a fixed set of five required
+headings, and a filename derived from the same timestamp so lexical order equals
+chronological order. Multi-scope output uses inline delimiter lines to separate
+per-scope sections. *Assessment:* deriving order from the filename rather than
+from the body was correct and fixed a real bug — but the header retained a date
+that the display path still reads and that the generated agent instructions still
+describe as the selection key, leaving three notions of ordering (filename,
+header date, modification time) of which only one is authoritative. The project
+field in that header is written by everything and read by nothing. The
+delimiter-based multi-scope format is fragile for the reason given in 7.4.
+
+**Tool-server registry.** An object under a `servers` key, each entry carrying a
+URL and an authentication mode of `bearer` or `none`; credentials in a separate
+key-value file with restrictive permissions, with a machine-local file taking
+precedence over the shared one. *Assessment:* separating credentials from the
+registry so the credential file alone can be excluded from sharing was elegant
+and produced a per-machine credential mode for no extra code. Storing credentials
+in version control at all is a deliberate, documented, defensible trade for this
+threat model — and the first thing to revisit.
+
+**Configuration files.** Shell-sourced key-value assignments, in a shared layer
+overridden by a machine-local layer. *Assessment:* executable configuration is a
+liability, and the shared layer was never reachable through the interface (1.2).
+
+**Managed regions in other tools' files.** Comment-delimited blocks with distinct
+begin and end markers, rebuilt at every session start, with surrounding content
+preserved and content the other tool appended inside the region rescued out of
+it. *Assessment:* necessary given the files are co-owned, but the rescue logic
+patches one observed collision and is not general.
+
+**Onboarding marker.** A versioned comment on the first line of the generated
+inventory recording completion and generation time, with a fallback read of an
+older location so machines onboarded under a previous scheme are recognized
+rather than treated as new. *Assessment:* the fallback is the right instinct and
+does not work — see Pattern D.
+
+**Published runtime description.** A small per-machine object naming the program
+version, its source revision, the container engine, and the agent-tool versions,
+rewritten only when its content changes so ordinary sessions produce no churn.
+*Assessment:* rewrite-on-change is exactly right and worth copying. The engine
+field is written and validated but never read by anything, and the agent-version
+string is a human-readable sentence rather than structured data, so comparing
+machines is a string equality test that reports any formatting change as drift.
+
+**Local state directory.** Configuration, the shared-store working copy,
+per-agent home directories, machine-local credentials, a quarantine area for
+rejected extension content, an update-check timestamp, a recorded install path, a
+recorded source revision, and a cached description of the built environment.
+Discovered either beside the installed executable — which is what makes a
+self-contained relocatable install possible — or at a conventional location under
+the user's home. *Assessment:* the "state beside the executable wins" rule is
+what makes the appliance platform workable and is worth keeping as a concept; the
+specific contents are incidental.
+
+**In-container layout.** A fixed home directory shared by every session, with the
+shared extension tree mounted at each agent's native extension path, this
+machine's knowledge directory mounted writable, all machines' knowledge and all
+repositories' continuation records mounted read-only, and forwarded sockets at
+fixed absolute paths. *Assessment:* mounting the shared tree directly at the
+agent's native path — rather than materializing copies into it — removed an
+entire class of second-source-of-truth problems and was the single best
+structural decision in this area.
