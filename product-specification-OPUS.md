@@ -69,9 +69,14 @@ can read the repository already has your notes"; there is no multi-user model, n
 no account concept, and no conflict-resolution algorithm. The documentation describes the product as
 "deliberately not production-grade: simple, readable, boring." **[C]**
 
-The audience is explicitly self-hosting and comfortable with the command line. One platform — a
-NAS-style appliance distribution whose root filesystem is rebuilt from flash storage on every reboot
-— receives dedicated first-class support, which strongly indicates a home-lab target. **[C]**
+The audience is explicitly self-hosting and comfortable with the command line. **Unraid** — a
+NAS-oriented Linux distribution whose root filesystem is rebuilt from a flash drive on every reboot —
+receives dedicated first-class support, which strongly indicates a home-lab target. **[C]**
+
+Unraid is named explicitly throughout this document rather than generalized. It is an external
+platform with real, verifiable constraints, not an internal abstraction, and a rebuild team cannot
+scope, test, or correctly implement this support without knowing which distribution is meant. Its
+contract is specified in §3.6.
 
 ## What problem it solves
 
@@ -279,7 +284,7 @@ caused a cross-machine outage.
 | **Self-update** | Stay current | Resolves the branch to an exact revision (to defeat CDN caching), downloads, syntax-checks, replaces atomically, then rebuilds the image using the *new* artifact **[C]** |
 | **Machine retirement** | Remove a machine from the fleet | Deletes only that machine's directory; history retains it **[C]** |
 | **Install / uninstall / command redirection** | Lifecycle | Single-command install; opt-out redirection of the agent commands; uninstall distinguishes program-only from full local removal and never touches the remote **[C]** |
-| **Platform persistence** | Survive reboot on RAM-backed root filesystems | Relocatable install plus a marked block in the platform's boot script restoring command links and the sync key **[C]** |
+| **Unraid persistence** | Survive reboot where the root filesystem is rebuilt from flash | Relocatable install onto array storage, plus a marked block in Unraid's user boot script restoring command links and the sync key **[C]** |
 
 ---
 
@@ -388,6 +393,54 @@ user to inspect and are never automatically deleted.
 **No signature or checksum verification exists anywhere.** Both installation and self-update trust
 the transport and check only that the downloaded script parses. **[C]**
 
+## 3.6 Unraid platform contract
+
+Unraid is the one operating system requiring behavior no other target needs. Everything below is a
+property of **Unraid**, not of the current implementation, so a rebuild must satisfy it regardless of
+design. All items **[C]** unless marked.
+
+**The constraints that force the behavior:**
+
+| Unraid property | Consequence |
+|---|---|
+| The root filesystem — including `/usr/local/bin` and `/root` — is rebuilt from the flash drive at every boot | A default install disappears on reboot. Command links and SSH material must be restored at each boot |
+| Persistent storage lives on the array, conventionally under `/mnt/user/...` | State must be relocatable there, and state *not* under `/mnt` is silently destroyed |
+| The flash drive is unencrypted FAT | Anything persisted there, including a private key, is stored in the clear. This is an accepted, documented trade-off |
+| `/boot/config/go` is Unraid's user boot script, and it starts the web UI | A malformed edit costs the user a trip to the flash drive with another computer. It must never be truncated or left unparseable |
+| Unraid runs as root; sandboxed sessions run as an unprivileged user | Project files owned by root are readable but not writable inside a session, and Git refuses to operate on them at all |
+| A root-owned credential agent socket cannot serve an unprivileged peer | The host's agent cannot simply be forwarded; a session-scoped one must be started as the session's user |
+
+**Required behavior:**
+
+1. **Detect Unraid** by a marker file, and make the marker, the flash config directory, and the live
+   command directory overridable — otherwise this behavior cannot be tested anywhere else. *(The
+   current code honors these overrides in most places but hardcodes the path in two, which is why one
+   test passes while writing a real system path — see §7.14.)*
+2. **Refuse a default install.** Interactively, ask for a persistent directory. Non-interactively,
+   fail with an exact rerun command rather than installing somewhere that will vanish.
+3. **Verify the array is mounted** before creating the install directory, so the whole path is not
+   silently created on the RAM disk.
+4. **Offer to install a marked, delimited block** in the user boot script that restores the command
+   links and the SSH key and known-hosts file. Never write outside the markers; never write a link
+   line with no resolved target.
+5. **Write that file safely** — stage on the same filesystem, verify it parses, keep the previous
+   known-good copy, install by rename. Refuse anything that fails verification. Never repair a block
+   with a missing terminator; report it and leave the file alone.
+6. **Persist the SSH key and known-hosts file to flash**, and restore *every* key type that was
+   persisted — see §7.14, where only one of three is restored while the health check reports success
+   for all three.
+7. **Keep the boot block in step** with later changes to which commands are redirected.
+8. **Remove the block on uninstall**, before anything else is removed.
+9. **Report in the health check** whether state is on persistent storage (a failure if not), whether
+   the boot block exists, and whether the key is backed up to flash.
+10. **Explain the ownership mismatch** at launch when project files are root-owned, including the
+    exact corrective command, and state that it cannot be fixed from inside the session.
+
+**Explicit design constraint carried forward:** do not build a platform abstraction layer for a
+second platform until a second platform exists. This is a stated rule in the existing development
+contract and is worth preserving — the Unraid-specific content should live in exactly one place, but
+it should not be generalized speculatively. **[C]**
+
 ---
 
 # 4. Data requirements
@@ -470,7 +523,7 @@ rebuild should treat that as a strong hint.
 controls.
 
 1. User runs the install command. Prerequisites are checked; the install directory is chosen by a
-   documented priority; on a RAM-backed-root platform the user is asked for a persistent directory
+   documented priority; on Unraid the user is asked for a persistent directory
    instead, and refused non-interactively with an exact rerun command.
 2. The program is downloaded (at a resolved exact revision), syntax-checked, and installed.
 3. Command redirects for both agents are offered; existing non-Satchel commands of the same name are
@@ -480,7 +533,8 @@ controls.
 5. Setup chains directly into enrollment: name the machine, supply the remote.
 6. If the remote is unreachable, the public key is displayed and the user is offered a retry loop.
 7. The shared tree is seeded, the machine is registered by an initial push (which doubles as a
-   write-access check), the platform boot block is offered, and the shared image is built.
+   write-access check), the Unraid boot block is offered where applicable, and the shared image is
+   built.
 
 **Result:** a machine that can immediately run `claude` or `codex`.
 **Failure paths:** a partially-populated destination is *preserved* under a recovery path rather than
@@ -742,11 +796,25 @@ rejection reason. The bundle is moved out of the library and, at session end, re
 previously committed version. The user sees two lines in a stream of exit output. There is no
 override, no allowlist, and no restore command; recovery is entirely manual.
 
-### 7.14 Platform persistence has a silent-failure path with a green light **[C]**
+### 7.14 Unraid persistence has a silent-failure path with a green light **[C]**
 
-Three key types are backed up to persistent storage, but the restore step handles only one of them.
-The health check globs all three when reporting success. A machine whose only key is one of the other
-two gets a backup that is never restored — and is told the backup is fine.
+Three SSH key types are backed up to the flash drive, but the boot block restores only one of them.
+The health check globs all three when reporting success. An Unraid machine whose only key is one of
+the other two gets a backup that is never restored after a reboot — and is told the backup is fine.
+The failure surfaces as "the sync remote is unreachable" on every boot, with a health check reporting
+green for the actual cause.
+
+Two related Unraid defects in the same area:
+
+- **The boot block writes a hardcoded command directory** while the surrounding code uses an
+  overridable one. The test suite sets the override and asserts the live link, but never inspects the
+  link target *inside the generated block* — so the tests pass while generating a block that points at
+  the real system path. This is the clearest example in the product of a test that cannot fail for the
+  thing it appears to check.
+- **An install onto the RAM disk can be silently accepted.** The "is the array started?" guard sits
+  inside the interactive branch only, so the documented non-interactive invocation — the one the README
+  recommends — skips it and creates the whole directory chain on temporary storage if the array is not
+  mounted. The install then disappears at the next reboot.
 
 ### 7.15 Additional confirmed problems
 
@@ -851,11 +919,18 @@ options, defaulting to "not now".
 *Evidence:* no signature or checksum anywhere; trust rests entirely on transport plus a repository name.
 *Default:* publish and verify a checksum at minimum.
 
-**9.10 Is the RAM-backed-root platform a supported target or the primary one?**
-*Why:* it accounts for a disproportionate share of complexity — relocatable installs, boot-script
-rewriting with backup and parse-gating, flash key persistence, root-versus-session identity handling.
-*Evidence:* explicit first-class support and a request not to abstract for a second platform until one
-exists. *Default:* keep support, keep it isolated, and confirm it is still needed.
+**9.10 Is Unraid a supported target, or the primary one?**
+*Why it matters:* Unraid accounts for a disproportionate share of total complexity — relocatable
+installs, boot-script rewriting with backup and parse-gating, flash key persistence, root-versus-session
+identity handling, and a dedicated set of health checks (§3.6). If it is the *primary* deployment
+target, that complexity is core and should be designed for first. If it is one supported platform among
+several, it should be isolated behind a narrow seam and its cost weighed against the number of users.
+*Evidence:* explicit first-class support in documentation and installer; a stated rule not to build a
+platform abstraction until a second platform exists; a full test file devoted to it; and an
+acknowledgement that a reported cross-machine problem turned out to be Unraid-specific. Nothing states
+how many Unraid machines actually exist in the fleet. *Simplest default:* keep support, keep every
+Unraid-specific behavior in exactly one place, and ask the user directly how many Unraid machines they
+run before investing further.
 
 **9.11 Should reporting commands ever fail?**
 *Why:* a command whose purpose is explaining a broken machine currently aborts partway through on some
@@ -1111,7 +1186,7 @@ Valuable, but not required for a coherent product. Each should be separately app
 | Clipboard forwarding | High user value, narrow mechanism |
 | Guided machine inventory | See §8.5 — large; the same file can be written by hand |
 | Cross-machine version drift reporting | Only useful at three or more machines, by its own analysis |
-| RAM-backed-root platform support | Substantial complexity; keep isolated |
+| Unraid support (§3.6) | Substantial complexity; required only if an Unraid machine is in the fleet; keep isolated |
 | Credential import from the host | Convenience only |
 | Self-update | Requires integrity verification (§9.9) if retained |
 | Update notification | Consider folding into the health check |
