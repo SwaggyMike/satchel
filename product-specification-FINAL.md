@@ -75,8 +75,7 @@ A **single technical individual** running several personal Linux machines — a 
 home server or NAS — who uses AI coding agents across all of them. Evidence for the single-user
 framing is direct and consistent: credentials are shared freely between machines because "anyone who
 can read the repository already has your notes"; there is no multi-user model, no permissions system,
-no account concept, and no conflict-resolution algorithm. The documentation describes the product as
-"deliberately not production-grade: simple, readable, boring." **[C]**
+no account concept, and no conflict-resolution algorithm. **[C]**
 
 The audience is explicitly self-hosting and comfortable with the command line: Git, SSH keys, Docker
 or Podman, and hand-edited configuration files are all assumed. **Unraid** — a NAS-oriented Linux
@@ -826,7 +825,12 @@ a server that does not exist must not report success.
   requirement; the distinction is.
 - **Simplicity is an explicit constraint**, with a stated complexity ceiling: if a feature cannot be
   written sanely within the chosen constraints, that is a signal the feature is too complex, not that
-  the constraints should change.
+  the constraints should change. The existing documentation puts this as "deliberately not
+  production-grade: simple, readable, boring." Read as a constraint on *scope and mechanism* — few
+  moving parts, boring solutions, no speculative abstraction — it is sound and worth carrying forward.
+  It is **not** a lower bar for correctness or data safety: §7 is largely the bill for reading it that
+  way, and the acceptance criteria in §10.6 assume the opposite. A rebuild should inherit the modesty
+  of scope and none of the tolerance for silent data loss.
 
 ## Weakly inferred
 
